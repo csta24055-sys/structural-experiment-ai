@@ -180,6 +180,11 @@ def _text(db: DB, text: str, dirs, rec, fmt: str, pages: int | None, path: Path)
                 ok = sec in text
                 rec("sections", f"{d['id']}:{sec}", "ok" if ok else "mismatch",
                     f"指示 #{d['id']}「{d['content']}」: 下書きに「{sec}」{'あり' if ok else 'なし'}")
+    if "考察" in text:
+        rec("discussion", "content", "unverified",
+            "「考察」あり。考察が結果・資料と矛盾しないか、妥当かは自動では判定しない（人が確認）")
+    else:
+        rec("discussion", "content", "needs_review", "「考察」の章が見つからない")
     # 提出条件（資料の提出形式・ページ数）
     src_facts: dict[str, set] = {}
     for d in dirs:

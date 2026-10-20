@@ -452,7 +452,7 @@ def cmd_style(args) -> int:
     from .style.apply import apply_to_markdown, ensure_profile
     from .style.profile import load_profile
     if args.action == "profile":
-        prof = ensure_profile(cfg)
+        prof = ensure_profile(cfg, _open_db(cfg))
         if prof is None:
             print("文章スタイルのPDFがありません（style.pdf_path または style.dropbox_path を設定）。他の処理には影響しません。")
             return 0

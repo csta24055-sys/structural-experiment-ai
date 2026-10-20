@@ -76,8 +76,87 @@ def check_file(db: DB, cfg, frow, local_path: Path | None, run_id: int | None = 
             elif u["unit_type"] == "image":
                 st, d = ocr_quality(rec.get("text", "")) if data.get("ocr", "なし") != "なし" else ("unverified", "OCRなし（AIでの読み取りが必要）")
                 record(db, stage=STAGE, check_type="ocr", target_type="unit", target_id=u["id"], status=st, detail=d, **kw)
+                _numbers(db, u, rec.get("text", ""), "画像の文字", kw)
+            elif u["unit_type"] in ("text_chunk", "office_part"):
+                _numbers(db, u, rec.get("text", ""), "本文", kw)
+            elif u["unit_type"] == "excel_sheet":
+                if data.get("truncated"):
+                    record(db, stage=STAGE, check_type="excel_truncated", target_type="unit", target_id=u["id"],
+                           status="needs_review", detail=f"シート「{lo['sheet']}」{lo['row_start']}〜{lo['row_end']}行: "
+                           f"セル数の上限で記録を打ち切った（excel.max_cells_per_unit）", **kw)
+            elif u["unit_type"] == "excel_workbook":
+                _chart_refs(db, u, data, kw)
+        _unit_coverage(db, frow, units, run_id)
     if frow["kind"] == "excel" and local_path is not None and Path(local_path).exists():
         recalc_workbook(db, cfg, frow, Path(local_path), run_id)
+
+
+def _numbers(db, u, text: str, what: str, kw) -> None:
+    if not (text or "").strip():
+        return
+    sus = suspicious_numbers(text)
+    record(db, stage=STAGE, check_type="numbers", target_type="unit", target_id=u["id"], status="needs_review" if sus else "ok",
+           detail=f"{what}: " + (f"数値の誤読の疑い（英字のO/l/Iが混入）: {', '.join(sus[:10])}" if sus else "数値表記に誤読の兆候なし"),
+           **kw)
+
+
+def _chart_refs(db, u, data, kw) -> None:
+    sheets = {s["name"] for s in data.get("sheets") or []}
+    bad = []
+    for c in data.get("charts") or []:
+        for s in c.get("series") or []:
+            for key in ("tx", "cat", "val", "xVal", "yVal"):
+                ref = s.get(key) or ""
+                if "!" in ref:
+                    sh = ref.rsplit("!", 1)[0].strip("'")
+                    if sh not in sheets:
+                        bad.append(f"{c.get('title') or 'グラフ'} の {key}: {ref}")
+    if data.get("charts"):
+        record(db, stage=STAGE, check_type="chart_refs", target_type="unit", target_id=u["id"],
+               status="mismatch" if bad else "ok",
+               detail=("存在しないシートを参照する系列: " + "; ".join(bad[:10])) if bad else
+               f"グラフ {len(data['charts'])} 個の系列はすべて実在するシートを参照", **kw)
+
+
+def _unit_coverage(db, frow, units, run_id) -> None:
+    """全ページ・全時間・全行が解析単位で隙間なく覆われ、すべて抽出済みか。"""
+    main = [u for u in units if u["unit_type"] in ("pdf_page", "video_segment", "excel_sheet", "text_chunk", "office_part", "image")]
+    if not main:
+        return
+    los = [json.loads(u["locator"]) for u in main]
+    gaps = []
+    t = main[0]["unit_type"]
+    if t == "pdf_page":
+        pages = sorted(lo["page"] for lo in los)
+        if pages != list(range(1, len(pages) + 1)):
+            gaps.append(f"ページ番号が連続していない: {pages[:10]}")
+    elif t == "video_segment":
+        segs = sorted((lo["start"], lo["end"]) for lo in los)
+        dur = los[0].get("duration") or segs[-1][1]
+        if abs(segs[0][0]) > 0.01:
+            gaps.append(f"先頭 0〜{segs[0][0]:.1f} 秒が未分割")
+        gaps += [f"{a[1]:.1f}〜{b[0]:.1f} 秒に隙間" for a, b in zip(segs, segs[1:]) if b[0] - a[1] > 0.01]
+        if dur - segs[-1][1] > 0.5:
+            gaps.append(f"末尾 {segs[-1][1]:.1f}〜{dur:.1f} 秒が未分割")
+    elif t == "excel_sheet":
+        by: dict[str, list] = {}
+        for lo in los:
+            by.setdefault(lo["sheet"], []).append((lo["row_start"], lo["row_end"]))
+        for sh, rs in by.items():
+            rs.sort()
+            if rs[0][0] != 1:
+                gaps.append(f"シート「{sh}」の先頭行が未分割")
+            gaps += [f"シート「{sh}」{a[1] + 1}〜{b[0] - 1} 行に隙間" for a, b in zip(rs, rs[1:]) if b[0] != a[1] + 1]
+    elif t == "text_chunk":
+        rs = sorted((lo["line_start"], lo["line_end"]) for lo in los)
+        gaps += [f"{a[1] + 1}〜{b[0] - 1} 行に隙間" for a, b in zip(rs, rs[1:]) if b[0] != a[1] + 1]
+    failed = [u for u in main if u["status"] != "done"]
+    st = "mismatch" if gaps else "needs_review" if failed else "ok"
+    record(db, stage=STAGE, check_type="unit_coverage", target_type="file", target_id=frow["id"], file_id=frow["id"],
+           status=st, run_id=run_id,
+           detail=(f"{frow['path']}: " + ("; ".join(gaps[:10]) if gaps else
+                                        f"{len(failed)}/{len(main)} 単位が未抽出・失敗" if failed else
+                                        f"全 {len(main)} 単位で隙間なく分割し、すべて抽出済み")))
 
 
 def _video(db, u, lo, data, kw) -> None:
@@ -121,6 +200,7 @@ def _video(db, u, lo, data, kw) -> None:
             worst = max((ocr_quality(t) for t in ocrs), key=lambda x: {"ok": 0, "unverified": 1, "needs_review": 2}[x[0]])
             record(db, stage=STAGE, check_type="ocr", target_type="unit", target_id=u["id"], status=worst[0],
                    detail=f"{where} {worst[1]}", **kw)
+            _numbers(db, u, "\n".join(ocrs), f"{where} 画面の文字", kw)
 
 
 def _pdf(db, u, lo, rec, data, kw) -> None:
@@ -137,6 +217,13 @@ def _pdf(db, u, lo, rec, data, kw) -> None:
     record(db, stage=STAGE, check_type="numbers", target_type="unit", target_id=u["id"],
            status="needs_review" if sus else "ok",
            detail=f"p.{p} " + (f"数値の誤読の疑い（英字のO/l/Iが混入）: {', '.join(sus[:10])}" if sus else "数値表記に誤読の兆候なし"), **kw)
+    for ti, tbl in enumerate(data.get("tables") or []):
+        widths = [ln.count("|") - 1 for ln in tbl.splitlines() if ln.strip().startswith("|")]
+        uneven = len(set(widths)) > 1
+        record(db, stage=STAGE, check_type="table_structure", target_type="table", target_id=f"{u['id']}:{ti}",
+               status="needs_review" if uneven or not widths else "ok",
+               detail=f"p.{p} 表{ti + 1}: " + (f"行ごとの列数が異なる {sorted(set(widths))}（結合セル・読み取り誤りの可能性）"
+                                               if uneven else f"{len(widths)} 行 × {widths[0] if widths else 0} 列"), **kw)
     bad = [f for f in data.get("formula_candidates", []) if unbalanced(f)]
     if data.get("formula_candidates"):
         record(db, stage=STAGE, check_type="formula", target_type="unit", target_id=u["id"],

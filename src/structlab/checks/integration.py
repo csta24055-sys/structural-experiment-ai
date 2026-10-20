@@ -121,6 +121,25 @@ def check_corpus(db: DB, run_id: int | None = None) -> None:
                status="mismatch" if pairs else ("ok" if len(docs) >= 2 else "unverified"),
                detail=(f"資料間で矛盾する指示 {len(pairs)} 組（conflicts.md 参照。どちらが有効かは判断していない）" if pairs else
                        "資料間で矛盾する指示は検出されなかった" if len(docs) >= 2 else "資料が1つのため照合対象なし"), run_id=run_id)
+        same = db.q("SELECT * FROM directive_links WHERE scope='corpus' AND relation='same_as'")
+        record(db, stage=STAGE, check_type="common_directives", target_type="corpus", target_id="all",
+               status="ok" if len(docs) >= 2 else "unverified", run_id=run_id,
+               detail=(f"複数資料に共通する指示の関連付け {len(same)} 組" if len(docs) >= 2 else "資料が1つのため照合対象なし"))
+        from ..semantic.engine import ELIGIBLE_KINDS
+        elig = [f for f in files if f["kind"] in ELIGIBLE_KINDS]
+        modes = {d["file_id"]: d["mode"] for d in docs}
+        missing = [f["path"] for f in elig if f["id"] not in modes]
+        local_only = [f["path"] for f in elig if modes.get(f["id"]) == "local"]
+        others = db.q("SELECT path, status FROM files WHERE status IN ('discovered','ready','failed','unsupported','skipped') "
+                      "AND parent_id IS NULL")
+        st = "needs_review" if missing or others else ("unverified" if local_only else "ok")
+        record(db, stage=STAGE, check_type="corpus_completeness", target_type="corpus", target_id="all", status=st,
+               run_id=run_id, actual={"included": len(docs), "missing": missing, "local_only": local_only,
+                                      "not_processed": [dict(r) for r in others]},
+               detail=f"統合に含めた資料 {len(docs)}／対象 {len(elig)}"
+                      + (f"；指示抽出が未実施 {len(missing)}" if missing else "")
+                      + (f"；未解析・失敗・未対応のファイル {len(others)}" if others else "")
+                      + (f"；AIによる意味理解なし（規則のみ） {len(local_only)}" if local_only else ""))
         cr = db.q1("SELECT * FROM sem_understanding WHERE scope='corpus' ORDER BY id DESC LIMIT 1")
         if cr is None:
             record(db, stage=STAGE, check_type="procedure", target_type="corpus", target_id="all", status="unverified",
@@ -129,6 +148,10 @@ def check_corpus(db: DB, run_id: int | None = None) -> None:
             data = json.loads(cr["data_json"])
             names = {d["path"] for d in docs}
             unknown, nosrc = [], []
+            steps = {x.get("step") for x in data.get("procedure") or []}
+            baddep = [f"{x.get('step')}→{d}" for x in data.get("procedure") or [] for d in x.get("depends_on") or [] if d not in steps]
+            if baddep:
+                unknown.append("存在しない手順への依存: " + ", ".join(baddep[:5]))
             for x in data.get("procedure") or []:
                 srcs = x.get("sources") or []
                 if not srcs:

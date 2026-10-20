@@ -42,7 +42,7 @@ REL_LABEL = {"correction_of": "訂正", "supplement_to": "補足", "exception_to
 ORIGIN_LABEL = {"explicit": "明示", "ai_inference": "AIの推論"}
 SPEAKER_LABEL = {"teacher_confirmed": "先生（利用者が確認済み）", "teacher_inferred": "先生とAIが推定（未確認）",
                  "unknown": "発言者未確認（先生の指示と断定していない）", "document": "資料の記述", "screen": "画面の表示",
-                 "student": "学生", "other": "その他"}
+                 "student": "学生", "other": "その他", "none": "なし（AIの推論であり、誰の発言でもない）"}
 OPEN_VER = ("needs_review", "omission_candidate", "class_mismatch_unresolved", "found_in_verify", "unverified")
 
 

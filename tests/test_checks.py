@@ -151,9 +151,9 @@ def test_understanding_and_directive_checks(lecture_src, cfg_factory):
     sp = {r["status"] for r in _checks(db, "directives", "speaker")}
     assert sp == {"unverified"}  # 話者識別をしていないので、先生の指示と断定しない
     vids = db.q("SELECT d.* FROM directives d JOIN sem_docs s ON s.id=d.doc_id WHERE s.mode='ai' AND d.source_path LIKE '%.mp4'")
-    assert vids and all(d["speaker"] == "unknown" for d in vids)
+    assert vids and all(d["speaker"] == ("none" if d["origin"] == "ai_inference" else "unknown") for d in vids)
     pdfs = db.q("SELECT d.* FROM directives d JOIN sem_docs s ON s.id=d.doc_id WHERE s.mode='ai' AND d.source_path LIKE '%.pdf'")
-    assert pdfs and all(d["speaker"] == "document" for d in pdfs)
+    assert pdfs and all(d["speaker"] == ("none" if d["origin"] == "ai_inference" else "document") for d in pdfs)
     md = (cfg.results_dir / "semantic" / "directives.md").read_text(encoding="utf-8")
     assert "発言者未確認（先生の指示と断定していない）" in md
     # 全体理解に存在しない場面番号・原文に無い根拠を入れると検出する

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -104,4 +105,5 @@ def scan(db: DB, source: Source, cfg, now: float | None = None) -> ScanResult:
             res.deleted.append(row["path"])
     db.set_kv("last_scan", str(scan_start))
     db.set_kv("last_scan_summary", str(res.summary()))
+    db.set_kv("last_scan_ignored", json.dumps(res.ignored[:1000], ensure_ascii=False))
     return res

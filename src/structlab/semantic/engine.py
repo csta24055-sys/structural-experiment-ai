@@ -601,7 +601,8 @@ class SemanticEngine:
             "unconfirmed": unconf, "origin": x.get("origin") if x.get("origin") in ("explicit", "ai_inference") else "ai_inference",
             "extracted_by": analyzer,
             "discourse": _j([rel] if rel != "none" else []),
-            "speaker": self._speaker(x.get("speaker"), None if sc.t_start is not None else "document"),
+            "speaker": ("none" if x.get("origin") == "ai_inference" else  # 推論は誰の発言でもない
+                        self._speaker(x.get("speaker"), None if sc.t_start is not None else "document")),
             "extra": {"relation_refers_to": x.get("relation_refers_to", ""), "relation_type": rel,
                       "speaker_claimed": x.get("speaker"), "speaker_basis": x.get("speaker_basis", "")},
         }

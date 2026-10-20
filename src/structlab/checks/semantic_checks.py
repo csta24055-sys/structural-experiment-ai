@@ -61,6 +61,7 @@ def check_understanding(db: DB, doc, frow, scenes: list[Scene], run_id: int | No
                 st, d = "ok", "時刻・根拠の引用を原文で確認"
             record(db, stage=ST_U, check_type="scene_grounding", target_type="scene", target_id=f"{did}:{sc.seq}",
                    status=st, detail=f"場面 #{sc.seq} {sc.where()}: {d}", unit_id=sc.unit_id, **kw)
+        _scene_level(db, did, scenes, kw)
         g = db.q1("SELECT * FROM sem_understanding WHERE scope='document' AND doc_id=? ORDER BY version DESC LIMIT 1", (did,))
         if g is None:
             record(db, stage=ST_U, check_type="global_refs", target_type="doc", target_id=did, status="unverified",
@@ -108,9 +109,42 @@ def check_understanding(db: DB, doc, frow, scenes: list[Scene], run_id: int | No
                status="ok" if conv == 1 else "needs_review" if conv == 0 else "unverified",
                detail=f"相互照合 {doc['round']} 回・" + ("収束" if conv == 1 else "上限まで変更が続いた（解釈が安定していない）" if conv == 0 else "未完了"),
                **kw)
+        unres = [x for x in g.get("apparent_contradictions") or [] if not x.get("resolved")]
+        record(db, stage=ST_U, check_type="apparent_contradictions", target_type="doc", target_id=did,
+               status="needs_review" if unres else "ok",
+               detail=("整合できなかった説明の食い違い（未解決として記録）: " + " / ".join(x.get("description", "")[:40] for x in unres[:5]))
+               if unres else f"一見矛盾する説明 {len(g.get('apparent_contradictions') or [])} 件はすべて根拠付きで整合", **kw)
+        roles = {x.get("scene_seq") for x in g.get("scene_roles") or []}
+        flow = {s for x in g.get("flow") or [] for s in x.get("scene_seqs") or []}
+        analysed = {sc.seq for sc in scenes if db.q1("SELECT 1 FROM sem_scenes WHERE doc_id=? AND unit_id=? AND status='ok'",
+                                                     (did, sc.unit_id))}
+        miss = sorted(s for s in analysed if s not in roles and s not in flow)
+        record(db, stage=ST_U, check_type="scene_role_coverage", target_type="doc", target_id=did,
+               status="needs_review" if miss else "ok",
+               detail=f"全体の流れ・役割に位置付けられていない場面: {miss}" if miss else f"解析した {len(analysed)} 場面すべてを位置付け", **kw)
         if g.get("_failed_scenes"):
             record(db, stage=ST_U, check_type="global_completeness", target_type="doc", target_id=did, status="needs_review",
                    detail=f"局所理解に失敗した場面 {g['_failed_scenes']} を含まない全体理解", **kw)
+
+
+def _scene_level(db, did, scenes, kw) -> None:
+    lacking, unread = [], []
+    n = len(scenes)
+    for i, sc in enumerate(scenes):
+        r = db.q1("SELECT analysis_json FROM sem_scenes WHERE doc_id=? AND unit_id=? AND status='ok' ORDER BY pass DESC LIMIT 1",
+                  (did, sc.unit_id))
+        if r is None:
+            continue
+        a = json.loads(r["analysis_json"] or "{}")
+        if (i > 0 and not str(a.get("relation_prev") or "").strip()) or (i < n - 1 and not str(a.get("relation_next") or "").strip()):
+            lacking.append(sc.seq)
+        unread += [f"#{sc.seq} {x}" for x in a.get("unreadable") or []]
+    record(db, stage=ST_U, check_type="scene_neighbors", target_type="doc", target_id=did,
+           status="needs_review" if lacking else "ok",
+           detail=f"直前・直後との関係が解釈されていない場面: {lacking}" if lacking else "全場面で前後の説明との関係を解釈", **kw)
+    record(db, stage=ST_U, check_type="unreadable", target_type="doc", target_id=did,
+           status="needs_review" if unread else "ok",
+           detail=("読み取り不能（推測で補っていない）: " + " / ".join(unread[:10])) if unread else "読み取り不能の箇所の報告なし", **kw)
 
 
 def check_directives(db: DB, doc, frow, cfg, run_id: int | None = None) -> None:
@@ -145,6 +179,7 @@ def check_directives(db: DB, doc, frow, cfg, run_id: int | None = None) -> None:
                detail=(f"未解決の見落とし候補: {['#' + str(i) for i in omis[:30]]}" if omis else
                        "規則候補はすべてAI抽出と突き合わせ済み" if doc["mode"] == "ai" else
                        "AI抽出がないため見落とし検査は未実施（規則による抽出のみ）"), **kw)
+        _directive_details(db, did, frow, doc, ds, kw)
         mis = [d["id"] for d in ds if d["verification"] == "class_mismatch_unresolved"]
         rev = [d["id"] for d in ds if d["verification"] in ("needs_review", "found_in_verify", "unverified")]
         record(db, stage=ST_D, check_type="classification", target_type="doc", target_id=did,
@@ -153,3 +188,45 @@ def check_directives(db: DB, doc, frow, cfg, run_id: int | None = None) -> None:
                        f"照合で確定していない指示: {['#' + str(i) for i in rev[:30]]}" if rev else
                        "全指示の分類を原文の言い回しと照合済み" if doc["mode"] == "ai" else
                        "分類は言い回しによる機械判定のみ（文脈での確認は未実施）"), **kw)
+
+
+_RESOLVED = ("verified", "revised")
+
+
+def _directive_details(db, did, frow, doc, ds, kw) -> None:
+    """既存の照合結果（第3回照合・関連付け）を、要件ごとの項目として記録する（照合は再実行しない）。"""
+    ai = [d for d in ds if d["extracted_by"] != "rule"]
+    noev = [d["id"] for d in ai if d["verification"] not in _RESOLVED
+            and any("根拠の引用" in n for n in json.loads(d["verification_notes"] or "[]"))]
+    record(db, stage=ST_D, check_type="evidence", target_type="doc", target_id=did, status="needs_review" if noev else "ok",
+           detail=(f"根拠の引用を元の範囲で確認できない指示: {['#' + str(i) for i in noev[:30]]}" if noev else
+                   "AI抽出の指示の根拠を原文で確認済み" if ai else "規則で原文から抽出した指示のみ（根拠は原文そのもの）"), **kw)
+    if frow["kind"] in ("video", "audio"):
+        notime = [d["id"] for d in ds if d["t_start"] is None and d["origin"] == "explicit"]
+        record(db, stage=ST_D, check_type="time_located", target_type="doc", target_id=did,
+               status="mismatch" if notime else "ok",
+               detail=f"時刻が特定されていない指示: {['#' + str(i) for i in notime[:30]]}" if notime else "全指示に時刻あり", **kw)
+    inf = [d for d in ds if d["origin"] == "ai_inference"]
+    bad = [d["id"] for d in inf if (d["speaker"] or "").startswith("teacher")]
+    record(db, stage=ST_D, check_type="inference_separation", target_type="doc", target_id=did,
+           status="mismatch" if bad else "ok",
+           detail=(f"AIの推論なのに先生の発言扱いの指示: {bad}" if bad else
+                   f"AIの推論 {len(inf)} 件は明示された指示・先生の発言と区別して記録"), **kw)
+    capped = [d["id"] for d in ds if any("照合の上限" in n for n in json.loads(d["verification_notes"] or "[]"))]
+    if capped:
+        record(db, stage=ST_D, check_type="verify_cap", target_type="doc", target_id=did, status="needs_review",
+               detail=f"照合の上限のため再解析していない指示: {['#' + str(i) for i in capped[:30]]}", **kw)
+    unres_rel = [d["id"] for d in ds if json.loads(d["extra_json"] or "{}").get("relation_unresolved")]
+    ids = [d["id"] for d in ds] or [-1]
+    qs = ",".join("?" * len(ids))
+    cand = db.q(f"SELECT * FROM directive_links WHERE scope='document' AND status='unresolved' AND relation!='conflicts_with' "
+                f"AND from_id IN ({qs})", ids)
+    record(db, stage=ST_D, check_type="relations", target_type="doc", target_id=did,
+           status="needs_review" if unres_rel or cand else "ok",
+           detail=("、".join(x for x in (f"関係先を特定できない訂正・例外等: {['#' + str(i) for i in unres_rel[:20]]}" if unres_rel else "",
+                                       f"原文の言い回しで確定できない関係（推定）: {len(cand)} 件" if cand else "") if x)
+                   or "訂正・例外・補足・条件変更の関係先をすべて原文で特定"), **kw)
+    conf = db.q(f"SELECT * FROM directive_links WHERE scope='document' AND relation='conflicts_with' AND from_id IN ({qs})", ids)
+    record(db, stage=ST_D, check_type="doc_conflicts", target_type="doc", target_id=did,
+           status="mismatch" if conf else "ok",
+           detail=(f"資料内で矛盾する指示 {len(conf)} 組（どちらが有効かは判断していない）" if conf else "資料内の矛盾する指示なし"), **kw)

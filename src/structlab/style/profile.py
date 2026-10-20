@@ -111,7 +111,7 @@ def _judge(it: StyleItem, policy: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def build_profile(pdf: Path, out: Path, policy: dict | None = None) -> dict:
+def build_profile(pdf: Path, out: Path, policy: dict | None = None, db=None) -> dict:
     import pymupdf
     data = pdf.read_bytes()
     with pymupdf.open(stream=data, filetype="pdf") as d:
@@ -121,6 +121,15 @@ def build_profile(pdf: Path, out: Path, policy: dict | None = None) -> dict:
             "policy": policy or default_policy(), "items": [asdict(i) for i in items]}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(prof, ensure_ascii=False, indent=1), encoding="utf-8")
+    if db is not None:
+        from collections import Counter
+
+        from ..checks.base import record
+        why = Counter(i.reason for i in items if not i.applicable)
+        record(db, stage="style", check_type="profile_scope", target_type="profile", target_id=prof["source_sha256"][:16],
+               status="ok" if stats["parsed"] == stats["declared_total"] else "needs_review", actual=stats,
+               detail=f"読み取り {stats['parsed']}／PDF記載 {stats['declared_total']} 項目、適用候補 {stats['applicable']}、"
+                      f"除外 {stats['excluded']}（" + "、".join(f"{k} {v}" for k, v in why.items()) + "）")
     return prof
 
 

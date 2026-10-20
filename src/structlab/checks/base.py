@@ -17,9 +17,9 @@ from typing import Any
 from ..db import DB
 
 STATUS_LABEL = {"ok": "成功", "mismatch": "不一致", "needs_review": "要確認", "unverified": "未検証", "failed": "チェック不能"}
-STAGE_LABEL = {"extraction": "資料抽出", "understanding": "局所理解・全体理解", "directives": "指示抽出",
+STAGE_LABEL = {"acquisition": "資料の取得", "extraction": "資料抽出", "understanding": "局所理解・全体理解", "directives": "指示抽出",
                "integration": "複数資料の統合", "deliverable": "提出物（Excel・レポート）", "style": "文章スタイル適用",
-               "reverify": "独立した再検証"}
+               "reverify": "独立した再検証", "operations": "運用・全体"}
 
 
 def _s(v: Any) -> str | None:

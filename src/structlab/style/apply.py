@@ -129,6 +129,15 @@ def apply_style(db: DB, cfg, text: str, *, provider=None, section: str = "", kin
                    "verification_json,analyzer) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                    (time.time(), phash, ihash, section, text, styled, final, status, json.dumps(rules or [], ensure_ascii=False),
                     json.dumps(ver or {}, ensure_ascii=False), analyzer))
+        from ..checks.base import record
+        v = ver or {}
+        cst = {"applied": "ok", "kept_original": v.get("status", "mismatch"), "skipped": "unverified", "failed": "failed"}[status]
+        record(db, stage="style", check_type="preservation", target_type="style_run", target_id=int(cur.lastrowid), status=cst,
+               detail=f"{section or '文章'}: " + {"applied": "内容の保存を確認して適用",
+                                                  "kept_original": "内容が変わった疑いがあるため元の文章を採用",
+                                                  "skipped": "未適用（" + str(v.get("note", "")) + "）",
+                                                  "failed": "適用に失敗したため元の文章を採用"}[status]
+               + ("：" + "；".join(v.get("mismatch", []) + v.get("needs_review", [])) if status == "kept_original" else ""))
         return {"id": int(cur.lastrowid), "status": status, "final": final, "styled": styled, "verification": ver or {}}
 
     if not st.get("enabled"):
@@ -175,7 +184,7 @@ def apply_to_markdown(db: DB, cfg, md: str, *, provider=None) -> tuple[str, list
     return "\n".join(out) + "\n", runs
 
 
-def ensure_profile(cfg) -> dict | None:
+def ensure_profile(cfg, db: DB | None = None) -> dict | None:
     """設定の PDF からプロファイルを作る（PDFが無ければ None。処理は止めない）。"""
     from .profile import build_profile
     st = cfg.data.get("style", {})
@@ -192,4 +201,4 @@ def ensure_profile(cfg) -> dict | None:
         _with_retry(lambda: dbx.files_download_to_file(str(pdf), st["dropbox_path"]), "文章スタイルPDFの取得")
     if pdf is None or not pdf.exists():
         return None
-    return build_profile(pdf, out)
+    return build_profile(pdf, out, db=db)

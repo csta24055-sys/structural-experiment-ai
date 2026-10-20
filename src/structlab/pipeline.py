@@ -111,6 +111,21 @@ class Pipeline:
         self.stats["ai_calls"] += 1
         return resp
 
+    def _record_run_checks(self) -> None:
+        """取得工程（A）と運用・全体（O）の項目、実行の最後の状態で記録する抽出工程の項目（B14・B15）。"""
+        if not self.cfg.data.get("checks", {}).get("enabled", True):
+            return
+        from .checks.acquisition import record_acquisition
+        from .checks.operations import record_operations
+        try:
+            record_acquisition(self.db, self.cfg, self.run_id)
+            record_operations(self.db, self.cfg, self.run_id, ai_note=self.provider_note,
+                              ai_blocked=self.ai_blocked or self.semantic.ai_stopped,
+                              external_allowed=bool(self.provider is not None and self.provider.external))
+        except Exception as e:  # noqa: BLE001
+            self.db.log_error(run_id=self.run_id, stage="checks:run", message=str(e), detail=traceback.format_exc())
+            log.error("全体チェックの記録に失敗: %s", e)
+
     def _run_extraction_checks(self, row, local_path: Path | None) -> None:
         """資料抽出工程に組み込んだチェック（時刻対応・文字起こし・OCR・数値・数式・Excel再計算・読み取り失敗）。"""
         if not self.cfg.data.get("checks", {}).get("enabled", True):
@@ -183,6 +198,7 @@ class Pipeline:
             if self.cfg.data.get("checks", {}).get("enabled", True):
                 from .checks.integration import check_corpus
                 check_corpus(self.db, self.run_id)
+            self._record_run_checks()
         except StopRun as e:
             log.warning("処理を中断しました: %s（次回の実行で続きから再開します）", e)
         except DiskSpaceError as e:
