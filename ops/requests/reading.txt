@@ -1,0 +1,4 @@
+# このファイルを変更して push すると、GitHub Actions の「Read materials」が動きます（Dropbox は読み取りのみ）。
+# allow_external_ai: true は有料（Claude による画像の書き起こし・用語の訂正）。見積もりを利用者が承認した後だけ true にする。
+allow_external_ai: false
+request: 2026-10-20 local reading of all materials (no AI)
