@@ -20,6 +20,13 @@ class MockProvider(AIProvider):
 
     def analyze(self, req: AIRequest) -> AIResponse:
         self.calls.append(req)
+        if req.schema is not None:  # 意味理解層のタスク
+            from .mock_semantic import TASKS
+            if "[[AI_FAIL]]" in req.text and self.fail_times > 0:
+                self.fail_times -= 1
+                raise AIError("mock: 一時的なエラー", retryable=True)
+            return AIResponse(data=TASKS[req.task](req.text), model=self.model,
+                              input_tokens=len(req.text) // 2 + 1600 * len(req.images), output_tokens=500)
         if "[[AI_FAIL]]" in req.text and self.fail_times > 0:
             self.fail_times -= 1
             raise AIError("mock: 一時的なエラー", retryable=True)

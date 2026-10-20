@@ -304,6 +304,10 @@ def write_reports(db: DB, cfg) -> dict[str, Path]:
                          f"{('★ ' + (t['reason'] or '')) if t['important'] else ''} |")
             (tdir / f"{name}.md").write_text("\n".join(T) + "\n", encoding="utf-8")
 
+    if cfg.data.get("semantic", {}).get("enabled"):
+        from .semantic.report import write_semantic_reports
+        paths.update({f"semantic_{k}": v for k, v in write_semantic_reports(db, cfg).items()})
+
     st = collect_status(db, cfg)
     (out / "status.md").write_text(status_markdown(st), encoding="utf-8")
     (out / "status.json").write_text(json.dumps(st, ensure_ascii=False, indent=1, default=str), encoding="utf-8")

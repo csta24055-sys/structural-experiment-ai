@@ -7,7 +7,12 @@
 - 外部AI（Claude）への資料送信は、**明示的に許可した場合だけ**行います。許可しなければローカル抽出のみで動きます
 - このリポジトリには実際の資料・解析結果・APIキーを入れません（`work/`・`config.yaml`・`.env` は `.gitignore` 済み）
 
-> 実験レポートや Excel の提出物は作りません。資料の整理・抽出だけを行います。
+> 実験レポートや Excel の提出物は作りません。資料の整理・抽出・理解だけを行います。
+
+**意味理解層**（[docs/SEMANTIC.md](docs/SEMANTIC.md)）: 動画の各場面（音声と映像を時刻で同期）の局所理解と、動画・資料全体の理解を
+相互に照合しながら更新し、先生の指示を A 禁止 / B 非推奨 / C 必須 / D 要望 / E 推奨 / F 任意 / G 条件付き / H その他 に分けて
+根拠（資料名・時刻・画面・発言・前後の文脈）付きで抽出し、元の映像・音声と再照合します。複数の動画・PDF・Excel説明を横断した統合理解も作ります。
+AI を使わない部分（言い回しによる指示抽出・訂正/例外/矛盾の検出・網羅率）は常に動き、AI の部分は明示的に許可したときだけ動きます。
 
 ---
 
@@ -33,9 +38,12 @@ iPhone 自体では解析を実行しません。iPhone は「指示を出す・
 # ローカル抽出のみ（資料を外部AIに送らない）
 scripts/run_analysis.sh
 
-# Claude による画像・動画フレーム・ページの解析も行う（送信を明示的に許可）
+# Claude による画像・動画フレーム・ページの解析と意味理解も行う（送信を明示的に許可・有料）
 scripts/run_analysis.sh --allow-external-ai
 ```
+
+AI を使わない実行の最後に、AI 解析を行った場合の呼び出し回数と概算費用（`structlab estimate`。APIは呼ばない）を表示します。
+内容と費用を確認してから `--allow-external-ai` を付けて実行してください。
 
 途中で止まっても、同じコマンドをもう一度実行すれば続きから再開します。結果は Dropbox の
 `/鋼材実験レポート用_解析結果/results/` に出力されます（iPhone の Dropbox アプリで閲覧可能）。
@@ -67,6 +75,9 @@ structlab errors               # 未解決のエラー
 structlab retry [--file 名前]  # 失敗した部分を再試行対象に戻す
 structlab reanalyze 名前       # 指定ファイルを強制的に再解析
 structlab report               # 結果ファイルを再生成
+structlab estimate             # AI解析（有料）の呼び出し回数・概算費用（APIは呼ばない）
+structlab search 中央値         # 指示・場面の理解を検索（出典の時刻付き）
+structlab show-directive 37    # 指示1件の根拠・前後・関連・照合結果
 ```
 
 設定ファイルは `-c` で指定します（既定 `config.yaml`、`scripts/run_analysis.sh` は `configs/dropbox.yaml`）。
@@ -83,6 +94,7 @@ structlab report               # 結果ファイルを再生成
 | `timelines/*.md` | 動画ごとの「発話 ↔ その時の画面」対応表と重要場面 |
 | `files/*.json` | ファイル別の詳細（ページごとの表・数式候補、Excel の数式・グラフ定義など） |
 | `status.md` / `status.json` | 処理状況・API使用量・エラー |
+| `semantic/` | 意味理解層の出力: 場面ごとの意味解析、資料全体の理解、指示一覧（A〜H・根拠付き）、統合要件、実験全体の理解、未確認事項、矛盾、訂正・補足・例外、失敗箇所、解析網羅率（[docs/SEMANTIC.md](docs/SEMANTIC.md)） |
 
 10分類: 1.実験の目的・概要 / 2.実験手順 / 3.測定データ / 4.Excel作成方法 / 5.レポート作成方法 / 6.必要な計算式・グラフ / 7.提出物の要件 / 8.先生の指示 / 9.注意事項・禁止事項 / 10.不明点・矛盾
 
@@ -142,6 +154,7 @@ python3 -m pytest -q -m "not slow" # 時間のかかるもの以外
 
 ## 9. ドキュメント
 
+- [docs/SEMANTIC.md](docs/SEMANTIC.md) — 意味理解層（局所理解・全体理解・指示の抽出と照合・資料横断）
 - [docs/SETUP_DROPBOX.md](docs/SETUP_DROPBOX.md) — Dropbox 接続設定
 - [docs/SETUP_AI.md](docs/SETUP_AI.md) — AI解析サービス・文字起こしの設定
 - [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md) — iPhone からクラウドで実行する手順（Claude Code / GitHub Actions）

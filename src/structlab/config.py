@@ -71,6 +71,28 @@ DEFAULTS: dict[str, Any] = {
         "max_input_tokens_per_run": 3_000_000,
         "max_output_tokens_per_run": 600_000,
         "max_calls_total": 0,
+        # 概算費用の計算用（USD / 100万トークン）。料金は変わるので公式の料金表で確認すること
+        "price_input_per_mtok": 4.0,
+        "price_output_per_mtok": 20.0,
+    },
+    "semantic": {
+        # 規則による指示抽出・照合・関連付け（AI不使用・常に安全）
+        "enabled": True,
+        # AIによる意味理解（局所理解・全体理解・相互照合・指示抽出・照合・資料横断の統合）。
+        # true でも、外部送信の許可（ai.allow_external または --allow-external-ai）が無ければ実行しない
+        "ai": False,
+        # true: 単位ごとの従来のAI解析を意味理解の場面解析で置き換える（画像の二重送信を避ける）
+        "replace_unit_analysis": False,
+        "max_rounds": 2,
+        "directive_context_scenes": 1,
+        "verify_expand_seconds": 45,
+        "max_verify_per_doc": 40,
+        "reextract_media": True,
+        "reinterpret_images": False,
+        "directive_images": False,
+        "max_synthesis_chars": 200000,
+        "corpus_max_chars": 300000,
+        "corpus_partial": False,
     },
 }
 

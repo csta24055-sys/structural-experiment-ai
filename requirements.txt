@@ -13,6 +13,7 @@ anthropic>=1.0
 # テスト用
 pytest>=8.0
 reportlab>=4.0
+jsonschema>=4.0
 
 # --- 任意（requirements-optional.txt 参照） ---
 # faster-whisper : 動画音声のローカル文字起こし

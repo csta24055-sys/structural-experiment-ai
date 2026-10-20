@@ -22,6 +22,8 @@ from .db import DB
 from .models import Item, UnitSpec, kind_for
 from .processors import UNSUPPORTED_HINTS, Ctx, Extraction, get_processor
 from .processors.video import focus_spec
+from .semantic import BudgetExceeded, SemanticEngine
+from .semantic.material import SCENE_TYPES
 from .safety import DiskSpaceError, SafetyError, ZipLimits, dropbox_content_hash, safe_extract_zip
 from .scanner import is_ignored, remote_file_of
 from .sources import Source, SourceChanged
@@ -78,6 +80,47 @@ class Pipeline:
         self.stats: dict[str, int] = {"files_done": 0, "files_failed": 0, "units_done": 0, "units_failed": 0,
                                       "ai_calls": 0, "ai_failed": 0, "skipped": 0, "duplicates": 0}
         self.cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.semantic = SemanticEngine(
+            cfg, db, ai_call=self._semantic_ai_call if provider is not None else None,
+            ai_name=provider.name if provider is not None else "", checkpoint=self._checkpoint,
+            transcriber=self.transcriber, ocr=self.ocr, run_id=self.run_id)
+        sem = cfg.data["semantic"]
+        #: 単位ごとの従来のAI解析を、意味理解の場面解析で置き換えるか
+        self.defer_to_semantic = bool(provider is not None and sem.get("enabled") and sem.get("ai")
+                                      and sem.get("replace_unit_analysis"))
+
+    def _semantic_ai_call(self, req: AIRequest, uid: int | None):
+        """意味理解層からの AI 呼び出し。使用量の上限・記録は単位ごとの解析と共通。"""
+        if self.ai_blocked:
+            raise BudgetExceeded(self.ai_blocked)
+        why = self.budget.check()
+        if why:
+            self.ai_blocked = why
+            raise BudgetExceeded(why)
+        prov = self.provider
+        try:
+            resp = prov.analyze(req)
+        except AIError:
+            self.db.x("INSERT INTO api_usage(run_id,unit_id,provider,model,input_tokens,output_tokens,images,ok,created_at)"
+                      " VALUES(?,?,?,?,0,0,?,0,?)", (self.run_id, uid, prov.name, prov.model, len(req.images), time.time()))
+            self.stats["ai_failed"] += 1
+            raise
+        self.db.x("INSERT INTO api_usage(run_id,unit_id,provider,model,input_tokens,output_tokens,images,ok,created_at)"
+                  " VALUES(?,?,?,?,?,?,?,1,?)", (self.run_id, uid, prov.name, resp.model, resp.input_tokens,
+                                                  resp.output_tokens, len(req.images), time.time()))
+        self.stats["ai_calls"] += 1
+        return resp
+
+    def _run_semantic(self, row, local_path: Path | None) -> None:
+        row = self.db.q1("SELECT * FROM files WHERE id=?", (row["id"],))
+        try:
+            self.semantic.process_file(row, local_path)
+        except (StopRun, DiskSpaceError):
+            raise
+        except Exception as e:  # noqa: BLE001  意味理解の失敗でファイルの抽出結果を失わない
+            self.db.log_error(run_id=self.run_id, stage="semantic", message=str(e), detail=traceback.format_exc(),
+                              file_id=row["id"])
+            log.error("意味理解の処理に失敗 %s: %s", row["path"], e)
 
     # ---------- 停止制御 ----------
     def install_signal_handlers(self) -> None:
@@ -118,12 +161,16 @@ class Pipeline:
                     self._checkpoint()
                     attempted.add(row["id"])  # 1回の実行で同じファイルは1度だけ（失敗分は次回再試行）
                     self.process_file(row)
+            # 意味理解の未完了分（AIを後から許可した場合など）と、資料横断の統合
+            self.semantic.backfill()
+            from .semantic.corpus import integrate
+            integrate(self.semantic)
         except StopRun as e:
             log.warning("処理を中断しました: %s（次回の実行で続きから再開します）", e)
         except DiskSpaceError as e:
             self.stop_reason = str(e)
             log.error("%s", e)
-        return {**self.stats, "stop_reason": self.stop_reason, "ai_blocked": self.ai_blocked,
+        return {**self.stats, "stop_reason": self.stop_reason, "ai_blocked": self.ai_blocked or self.semantic.ai_stopped,
                 "downloaded_mb": round(self.downloaded / 1e6, 1)}
 
     # ---------- ファイル ----------
@@ -196,6 +243,8 @@ class Pipeline:
                 finished = self._process_zip(row, local_path, depth)
             else:
                 finished = self._process_units(row, local_path)
+                if finished:
+                    self._run_semantic(row, local_path)  # 元ファイルが手元にあるうちに（照合時の再取得用）
         except StopRun:
             self._set_file(fid, "ready", "中断（次回続きから）")
             raise
@@ -317,6 +366,9 @@ class Pipeline:
         log.info("  抽出完了 %s（図表等の要AI解析: %s）", self._source_label(row, proc, spec),
                  "; ".join(ex.needs_ai) or "なし")
         if self.provider is not None:
+            if self.defer_to_semantic and spec.unit_type in SCENE_TYPES:
+                self.db.x("UPDATE units SET ai_status='deferred_semantic' WHERE id=?", (uid,))
+                return
             self._ai_unit(row, uid, spec, proc, ex, page)
 
     @staticmethod

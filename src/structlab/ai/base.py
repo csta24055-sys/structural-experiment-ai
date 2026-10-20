@@ -21,6 +21,10 @@ class AIRequest:
     images: list[AIImage] = field(default_factory=list)
     t_start: float | None = None
     t_end: float | None = None
+    #: 意味理解層など、独自の指示文・出力スキーマを使う場合に指定（None なら従来の抽出用）
+    system: str | None = None
+    schema: dict | None = None
+    max_tokens: int | None = None
 
 
 @dataclass

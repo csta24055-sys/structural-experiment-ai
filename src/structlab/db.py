@@ -138,6 +138,106 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+
+-- ===== 意味理解層（semantic） =====
+-- 資料ごとの解析段階（第1回 理解 / 第2回 指示抽出 / 第3回 照合）の進行状況
+CREATE TABLE IF NOT EXISTS sem_docs (
+    id INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL REFERENCES files(id),
+    file_hash TEXT NOT NULL,
+    version TEXT NOT NULL,
+    mode TEXT NOT NULL,             -- local（規則のみ）/ ai（AI意味理解あり）
+    step TEXT NOT NULL DEFAULT 'scenes',
+    round INTEGER NOT NULL DEFAULT 0,
+    converged INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    note TEXT,
+    updated_at REAL,
+    UNIQUE(file_id, file_hash, version, mode)
+);
+-- 場面（＝既存の解析単位）ごとの局所理解。pass=1 が初回、2以降が全体理解を踏まえた再解釈
+CREATE TABLE IF NOT EXISTS sem_scenes (
+    id INTEGER PRIMARY KEY,
+    doc_id INTEGER NOT NULL REFERENCES sem_docs(id),
+    unit_id INTEGER NOT NULL REFERENCES units(id),
+    seq INTEGER NOT NULL,
+    pass INTEGER NOT NULL,
+    t_start REAL, t_end REAL, page INTEGER,
+    status TEXT NOT NULL,           -- ok / failed / skipped
+    analysis_json TEXT,
+    changes_json TEXT,
+    error TEXT,
+    created_at REAL,
+    UNIQUE(doc_id, unit_id, pass)
+);
+-- 場面ごと・段階ごとの解析状態（rules / scene1 / reinterpret / directives / verify）。網羅率の計算に使う
+CREATE TABLE IF NOT EXISTS sem_steps (
+    id INTEGER PRIMARY KEY,
+    doc_id INTEGER NOT NULL REFERENCES sem_docs(id),
+    unit_id INTEGER NOT NULL,
+    step TEXT NOT NULL,
+    status TEXT NOT NULL,           -- ok / failed / failed_final / skipped
+    attempts INTEGER NOT NULL DEFAULT 0,
+    detail TEXT,
+    updated_at REAL,
+    UNIQUE(doc_id, unit_id, step)
+);
+-- 全体理解（資料単位 scope='document' / 資料横断 scope='corpus'）。version ごとに履歴を残す
+CREATE TABLE IF NOT EXISTS sem_understanding (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,
+    doc_id INTEGER,
+    corpus_key TEXT,
+    version INTEGER NOT NULL,
+    data_json TEXT NOT NULL,
+    analyzer TEXT,
+    created_at REAL
+);
+-- 指示（禁止・非推奨・必須・要望・推奨・任意・条件付き・その他）
+CREATE TABLE IF NOT EXISTS directives (
+    id INTEGER PRIMARY KEY,
+    doc_id INTEGER NOT NULL REFERENCES sem_docs(id),
+    file_id INTEGER NOT NULL,
+    unit_id INTEGER,
+    directive_class TEXT NOT NULL,
+    base_strength TEXT,
+    content TEXT NOT NULL,
+    target_task TEXT,
+    deliverable TEXT,
+    audience TEXT,
+    condition TEXT,
+    source_path TEXT NOT NULL,
+    t_start REAL, t_end REAL, page INTEGER,
+    screen TEXT,
+    operation TEXT,
+    speech TEXT,
+    evidence TEXT,
+    context_before TEXT,
+    context_after TEXT,
+    certainty TEXT,
+    unconfirmed TEXT,
+    origin TEXT NOT NULL,           -- explicit（明示）/ ai_inference（AIの推論）
+    extracted_by TEXT NOT NULL,     -- rule / ai:<model> / rule+verify
+    marker TEXT,
+    discourse TEXT,
+    verification TEXT NOT NULL DEFAULT 'unverified',
+    verification_notes TEXT,
+    effective TEXT NOT NULL DEFAULT 'effective',
+    extra_json TEXT,
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_dir_doc ON directives(doc_id);
+CREATE TABLE IF NOT EXISTS directive_links (
+    id INTEGER PRIMARY KEY,
+    from_id INTEGER NOT NULL REFERENCES directives(id),
+    to_id INTEGER NOT NULL REFERENCES directives(id),
+    relation TEXT NOT NULL,         -- same_as / correction_of / supplement_to / exception_to / condition_change_of / conflicts_with / corroborated_by
+    scope TEXT NOT NULL,            -- document / corpus
+    basis TEXT NOT NULL,            -- rule / ai / rule+ai
+    note TEXT,
+    status TEXT NOT NULL DEFAULT 'recorded',  -- recorded / unresolved / resolved_explicit
+    UNIQUE(from_id, to_id, relation)
+);
 """
 
 

@@ -43,3 +43,28 @@ ai:
   max_calls_per_run: 300
   max_input_tokens_per_run: 3000000
   max_output_tokens_per_run: 600000
+  price_input_per_mtok: 4.0
+  price_output_per_mtok: 20.0
+
+# 意味理解（局所理解・全体理解・相互照合・指示の網羅的抽出と照合・資料横断の統合）。docs/SEMANTIC.md 参照
+semantic:
+  # 規則による指示抽出・照合・関連付け（AI不使用。常に安全）
+  enabled: true
+  # AIによる意味理解。true でも外部送信の許可（--allow-external-ai）が無ければ実行しない。
+  # 有料APIを使うので、先に `structlab estimate` で呼び出し回数・概算費用を確認すること
+  ai: true
+  # true: 単位ごとの従来のAI解析を、意味理解の場面解析で置き換える（画像の二重送信を避ける）
+  replace_unit_analysis: true
+  # 局所理解と全体理解の相互照合（再解釈）の最大回数。変更がなくなれば早く終わる
+  max_rounds: 2
+  # 指示抽出で前後何場面を文脈として渡すか
+  directive_context_scenes: 1
+  # 第3回照合で前後に広げる秒数
+  verify_expand_seconds: 45
+  # 1資料あたり AI で再照合する指示の上限（超えた分は「要確認」として残す）
+  max_verify_per_doc: 40
+  # 照合時に元動画から画面と音声を取り直す（元ファイルが手元にある場合）
+  reextract_media: true
+  # 再解釈・指示抽出でも画像を送るか（送ると精度は上がるが費用が増える）
+  reinterpret_images: false
+  directive_images: false

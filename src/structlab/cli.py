@@ -9,6 +9,9 @@
   retry        失敗した部分を再試行対象に戻す
   reanalyze    指定ファイルを強制的に再解析
   errors       未解決のエラー一覧
+  estimate     AI解析（有料）を始める前の呼び出し回数・費用の概算（APIは呼ばない）
+  search       指示・場面の理解をキーワード検索
+  show-directive 指示1件の根拠・前後の文脈・関連・照合結果を表示
   dropbox-auth Dropbox のリフレッシュトークン取得（PKCE）
 """
 from __future__ import annotations
@@ -358,6 +361,49 @@ def cmd_errors(args) -> int:
     return 0
 
 
+def cmd_estimate(args) -> int:
+    """AI解析（有料）を始める前の概算。APIは呼ばない。"""
+    overrides = {"semantic": {"ai": True}} if args.with_semantic else None
+    cfg = load_config(args.config, overrides)
+    if not cfg.db_path.exists():
+        Syncer(cfg).pull_state()
+    if not cfg.db_path.exists():
+        print("まだ一度も実行されていません。先に AI なしで `structlab run` を実行してください。")
+        return 0
+    from .semantic.estimate import estimate, estimate_text
+    db = _open_db(cfg)
+    e = estimate(db, cfg)
+    print(json.dumps(e, ensure_ascii=False, indent=1) if args.json else estimate_text(e))
+    return 0
+
+
+def cmd_search(args) -> int:
+    cfg = load_config(args.config)
+    from .semantic.report import search
+    db = _open_db(cfg)
+    hits = search(db, args.keyword, args.limit)
+    if not hits:
+        print("見つかりませんでした")
+    for h in hits:
+        if h["type"] == "directive":
+            print(f"[指示 #{h['id']}] {h['class']} {h['text']}\n    {h['source']} {h['where']} ／ {h['verification']} ／ {h['effective']}")
+        else:
+            print(f"[場面] {h['source']} {h['where']}（解釈 {h['pass']} 版）: {h['text']}")
+    return 0
+
+
+def cmd_show_directive(args) -> int:
+    cfg = load_config(args.config)
+    from .semantic.report import directive_record
+    db = _open_db(cfg)
+    d = db.q1("SELECT * FROM directives WHERE id=?", (args.id,))
+    if d is None:
+        print("その番号の指示はありません")
+        return 1
+    print(json.dumps(directive_record(db, d), ensure_ascii=False, indent=1))
+    return 0
+
+
 def cmd_dropbox_auth(args) -> int:
     from dropbox import DropboxOAuth2FlowNoRedirect
     app_key = os.environ.get("DROPBOX_APP_KEY")
@@ -413,6 +459,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("path", help="パスの一部")
     p = sub.add_parser("errors")
     p.add_argument("--limit", type=int, default=30)
+    p = sub.add_parser("estimate", help="AI解析の呼び出し回数・費用の概算（APIは呼ばない）")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--with-semantic", action="store_true", help="semantic.ai が無効な設定でも、有効にした場合を見積もる")
+    p = sub.add_parser("search", help="指示・場面の理解をキーワード検索（出典の時刻付き）")
+    p.add_argument("keyword")
+    p.add_argument("--limit", type=int, default=50)
+    p = sub.add_parser("show-directive", help="指示1件の全項目（根拠・前後・関連・照合）を表示")
+    p.add_argument("id", type=int)
     p = sub.add_parser("dropbox-auth")
     p.add_argument("step", choices=["start", "finish"])
     p.add_argument("code", nargs="?")
@@ -420,6 +474,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"init": cmd_init, "check": cmd_check, "scan": cmd_scan, "run": cmd_run, "status": cmd_status,
                 "report": cmd_report, "retry": cmd_retry, "reanalyze": cmd_reanalyze, "errors": cmd_errors,
+                "estimate": cmd_estimate, "search": cmd_search, "show-directive": cmd_show_directive,
                 "dropbox-auth": cmd_dropbox_auth}[args.cmd](args)
     except ConfigError as e:
         print(f"設定エラー: {e}", file=sys.stderr)

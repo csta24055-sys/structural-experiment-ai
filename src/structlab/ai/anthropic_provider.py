@@ -44,18 +44,21 @@ class AnthropicProvider(AIProvider):
             media, data = encode_image(img.path, self.max_image_edge)
             content.append({"type": "text", "text": f"[画像: {img.label}]"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}})
-        content.append({"type": "text", "text": build_user_text(req.task, req.source_label, req.text)})
+        if req.schema is not None:  # 意味理解層: 本文は呼び出し側で組み立て済み
+            content.append({"type": "text", "text": req.text})
+        else:
+            content.append({"type": "text", "text": build_user_text(req.task, req.source_label, req.text)})
         return content
 
     def analyze(self, req: AIRequest) -> AIResponse:
         a = self._anthropic
         kwargs = dict(
             model=self.model,
-            max_tokens=self.max_tokens,
-            system=SYSTEM_PROMPT,
+            max_tokens=req.max_tokens or self.max_tokens,
+            system=req.system or SYSTEM_PROMPT,
             messages=[{"role": "user", "content": self._content(req)}],
             output_config={"effort": self.effort,
-                           "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+                           "format": {"type": "json_schema", "schema": req.schema or OUTPUT_SCHEMA}},
         )
         try:
             if self.use_fallbacks:
