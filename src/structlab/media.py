@@ -110,7 +110,9 @@ class Region:
         return self.w * self.h >= 0.9 * self.full_w * self.full_h
 
     def ffmpeg_crop(self) -> str:
-        return f"crop={self.w}:{self.h}:{self.x}:{self.y}"
+        # 録画の途中で画面の向き・大きさが変わっても失敗しないよう、切り出す範囲を画面の大きさに収める
+        return (f"crop=w='min({self.w}\\,iw)':h='min({self.h}\\,ih)'"
+                f":x='min({self.x}\\,iw-ow)':y='min({self.y}\\,ih-oh)'")
 
     def as_dict(self) -> dict:
         return {"x": self.x, "y": self.y, "w": self.w, "h": self.h, "full_w": self.full_w, "full_h": self.full_h}

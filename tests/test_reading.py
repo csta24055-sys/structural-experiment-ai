@@ -268,3 +268,18 @@ def test_reading_workflow_is_readonly_and_ai_gated():
     up = next(s for s in d["jobs"]["read"]["steps"] if s.get("uses", "").startswith("actions/upload-artifact"))
     assert up["with"]["path"] == "work/reading" and up["with"]["retention-days"] <= 7
     assert "GH_SECRETS_TOKEN" not in text and "echo $DROPBOX" not in text
+
+
+@needs_ffmpeg
+def test_crop_survives_resolution_change(tmp_path):
+    """録画の途中で画面の向き・大きさが変わっても、切り出しで失敗しない（実際の画面録画で発生した不具合）。"""
+    from structlab import media
+    a, b = tmp_path / "a.ts", tmp_path / "b.ts"
+    for p, size in ((a, "360x780"), (b, "780x360")):
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=yellow:s={size}:d=3",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-f", "mpegts", str(p)], check=True)
+    ab = tmp_path / "ab.ts"
+    ab.write_bytes(a.read_bytes() + b.read_bytes())
+    reg = media.Region(40, 200, 280, 600, 360, 780)
+    frames = media.sample_gray_frames(ab, 0, 6, 1.0, w=100, h=200, crop=reg.ffmpeg_crop())
+    assert len(frames) >= 5
