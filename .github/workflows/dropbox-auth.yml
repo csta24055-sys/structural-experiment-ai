@@ -1,0 +1,51 @@
+# Dropbox の認可コードを GitHub Actions でリフレッシュトークンに交換し、そのまま接続確認する（ショートカット不要）。
+#   1) 利用者: Safari で許可 → 表示されたコードを Secret DROPBOX_AUTH_CODE に登録（数分で失効するのですぐに）
+#   2) Claude Code: ops/requests/dropbox-auth.txt を変更して push → このワークフローが交換し、続けて接続確認
+# トークンはこの実行の中だけで使い（権限600の一時ファイル）、どこにも保存しない。ログにも出さない。
+name: Dropbox auth
+
+on:
+  push:
+    paths:
+      - "ops/requests/dropbox-auth.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dropbox-auth
+  cancel-in-progress: false
+
+jobs:
+  exchange:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CLAUDE_API_KEY || secrets.ANTHROPIC_KEY || secrets.CLAUDE_KEY }}
+      SECRET_SET_DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY != '' }}
+      SECRET_SET_DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET != '' }}
+      SECRET_SET_DROPBOX_AUTH_CODE: ${{ secrets.DROPBOX_AUTH_CODE != '' }}
+      SECRET_SET_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      STRUCTLAB_CONFIG: configs/dropbox.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: |
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q -e .
+      # 時間のかかる準備より先に交換する（コードは数分で失効）
+      - name: Exchange authorization code
+        env:
+          DROPBOX_AUTH_CODE: ${{ secrets.DROPBOX_AUTH_CODE }}
+        run: python -m structlab dropbox-auth exchange
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg
+      - name: Connection check
+        run: python -m structlab -c "$STRUCTLAB_CONFIG" connect-check

@@ -264,3 +264,47 @@ def test_oauth_diagnosis_pinpoints_cause(monkeypatch):
     assert out["app_credentials"] == "invalid" and out["authorize_url"] == "rejected" and out["refresh"] == "failed"
     text = "\n".join(lines + lines2)
     assert not any(v in text for v in SECRETS.values()) and "sl.ACCESS-5555" not in text
+
+
+# ---------- 認可コードの交換（GitHub Actions 用・通信なし） ----------
+def test_exchange_code_saves_privately_and_masks(tmp_path, monkeypatch, capsys):
+    from structlab import token_store as ts
+    monkeypatch.setenv("DROPBOX_APP_KEY", SECRETS["DROPBOX_APP_KEY"])
+    monkeypatch.setenv("DROPBOX_APP_SECRET", SECRETS["DROPBOX_APP_SECRET"])
+    monkeypatch.setenv("DROPBOX_AUTH_CODE", " code-XYZ \n")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    sent = []
+
+    class Http:
+        def post(self, url, data, timeout):
+            sent.append(data)
+            j = {"refresh_token": "refresh-NEW-7777", "access_token": "sl.A-8888", "scope": "files.content.read"}
+            return SimpleNamespace(status_code=200, json=lambda: j)
+
+    assert ts.cmd_exchange(http=Http())["scope"] == "files.content.read"
+    assert sent[0]["code"] == "code-XYZ" and sent[0]["grant_type"] == "authorization_code"
+    tok = tmp_path / "creds" / "dropbox_refresh_token"
+    assert tok.read_text() == "refresh-NEW-7777" and oct(tok.stat().st_mode & 0o777) == "0o600"
+    out = capsys.readouterr().out
+    # 出力されるのは GitHub に伏せ字を指示する行だけ
+    assert all(ln.startswith("::add-mask::") for ln in out.splitlines() if "7777" in ln or "8888" in ln)
+    assert dropbox_credentials()["refresh_token"] == "refresh-NEW-7777"
+
+    class Bad:
+        def post(self, url, data, timeout):
+            return SimpleNamespace(status_code=400, json=lambda: {"error": "invalid_grant"})
+
+    with pytest.raises(ts.TokenError, match="期限切れ"):
+        ts.cmd_exchange(http=Bad())
+
+
+def test_dropbox_auth_workflow_exchanges_before_slow_setup():
+    d, on = _wf("dropbox-auth.yml")
+    assert on["push"]["paths"] == ["ops/requests/dropbox-auth.txt"] and d["permissions"] == {"contents": "read"}
+    steps = d["jobs"]["exchange"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    assert names.index("Exchange authorization code") < names.index("System packages")
+    ex = steps[names.index("Exchange authorization code")]
+    assert ex["env"]["DROPBOX_AUTH_CODE"] == "${{ secrets.DROPBOX_AUTH_CODE }}"
+    text = (ROOT / ".github/workflows/dropbox-auth.yml").read_text()
+    assert "cache" not in text and "upload-artifact" not in text and "echo $" not in text

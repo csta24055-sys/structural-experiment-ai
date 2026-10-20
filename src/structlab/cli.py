@@ -527,6 +527,16 @@ def cmd_dropbox_auth(args) -> int:
     from .sources.dropbox_source import CRED_DIR, READ_SCOPES, dropbox_credentials
     cdir = CRED_DIR.expanduser()
     state = cdir / "pkce.json"
+    if args.step == "exchange":
+        from . import token_store as ts
+        try:
+            info = ts.cmd_exchange()
+        except ts.TokenError as e:
+            print(f"[NG ] {e}")
+            return 1
+        print("[OK ] 認可コードをリフレッシュトークンに交換し、この実行環境の一時ファイル（権限600）に保存しました"
+              f"（値は表示しません）。許可された権限: {info['scope'] or '不明'}")
+        return 0
     if args.step == "start":
         app_key = dropbox_credentials()["app_key"]
         if not app_key:
@@ -638,7 +648,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("trace", help="結果がどの工程を経て作られたかを表示（例: directive:37）")
     p.add_argument("target")
     p = sub.add_parser("dropbox-auth", help="Dropbox のリフレッシュトークン取得（PKCE。値は表示しない）")
-    p.add_argument("step", choices=["start", "finish"])
+    p.add_argument("step", choices=["start", "finish", "exchange"],
+                   help="start/finish: PKCE（手元）。exchange: GitHub Actions 用（Secret DROPBOX_AUTH_CODE を交換）")
     p.add_argument("code", nargs="?")
     p.add_argument("--write", action="store_true", help="解析結果の保存用に files.content.write も許可する")
     p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")

@@ -69,6 +69,16 @@ https://www.dropbox.com/oauth2/authorize?response_type=code&token_access_type=of
 - 確実なのは A-5 の接続確認: `/鋼材実験レポート用` が見えれば Full Dropbox。App folder の場合は「何も見えない」と表示されます
 
 
+### A-2/A-3 の代わり: GitHub Actions でコードを交換する（ショートカット不要）
+1. A-3 の URL で「許可」→ 表示されたコードをコピー
+2. すぐに Safari で https://github.com/csta24055-sys/structural-experiment-ai/settings/secrets/actions/new を開き、
+   Name `DROPBOX_AUTH_CODE`、Secret にコードを貼って Add secret（2回目以降は一覧の DROPBOX_AUTH_CODE → Update）
+3. Claude Code に「登録した」と伝える → `ops/requests/dropbox-auth.txt` を push して **Dropbox auth** ワークフローを起動し、
+   交換と接続確認（一覧・動画/PDF/Excel の取得）を行う
+
+この方法のトークンはその実行の中だけで使い、どこにも保存しません（GitHub Actions は Secrets を書き込めないため）。
+継続して自動実行するには、トークンを `DROPBOX_REFRESH_TOKEN` に登録するか、保管方法を別途決める必要があります。
+
 ### A-4. GitHub Secrets に登録する（Safari）
 GitHub アプリでは Secrets を編集できないので Safari で開きます:
 https://github.com/csta24055-sys/structural-experiment-ai/settings/secrets/actions/new
