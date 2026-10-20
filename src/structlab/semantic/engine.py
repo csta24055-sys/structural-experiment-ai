@@ -164,6 +164,16 @@ class SemanticEngine:
             self._set_doc(d["id"], step="relations")
         link_document(self.db, d["id"])
         self._set_doc(d["id"], step="done", status="done")
+        self._post_checks(frow, "local", scenes)
+
+    def _post_checks(self, frow, mode: str, scenes: list[Scene]) -> None:
+        """意味理解・指示抽出の工程に組み込んだチェック（AI不使用）。"""
+        if not self.cfg.data.get("checks", {}).get("enabled", True):
+            return
+        from ..checks.semantic_checks import check_directives, check_understanding
+        doc = self._doc_row(frow, mode)
+        check_understanding(self.db, doc, frow, scenes, self.run_id)
+        check_directives(self.db, doc, frow, self.cfg, self.run_id)
 
     def _extract_rule_directives(self, doc_id: int, frow, scenes: list[Scene], candidate: bool) -> None:
         with self.db.tx():
@@ -192,6 +202,7 @@ class SemanticEngine:
                             "extracted_by": "rule", "marker": rd.marker, "discourse": _j(rd.discourse),
                             "verification": "candidate" if candidate else "rule_extracted",
                             "extra": {"line_origin": ln.origin},
+                            "speaker": self._speaker(None, ln.origin),
                         })
                 self._mark(doc_id, sc.unit_id, "rules", "ok")
 
@@ -200,7 +211,7 @@ class SemanticEngine:
             "INSERT INTO directives(doc_id,file_id,unit_id,directive_class,base_strength,content,target_task,deliverable,"
             "audience,condition,source_path,t_start,t_end,page,screen,operation,speech,evidence,context_before,"
             "context_after,certainty,unconfirmed,origin,extracted_by,marker,discourse,verification,verification_notes,"
-            "effective,extra_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "effective,extra_json,created_at,speaker) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (doc_id, frow["id"], sc.unit_id if sc else None, d["directive_class"], d.get("base_strength"), d["content"],
              d.get("target_task", ""), d.get("deliverable", ""), d.get("audience", ""), d.get("condition"),
              frow["path"], d.get("t_start"), d.get("t_end"), d.get("page", sc.page if sc else None),
@@ -208,8 +219,22 @@ class SemanticEngine:
              d.get("context_before", ""), d.get("context_after", ""), d.get("certainty", "low"),
              d.get("unconfirmed", ""), d["origin"], d["extracted_by"], d.get("marker", ""), d.get("discourse", "[]"),
              d.get("verification", "unverified"), _j(d.get("verification_notes", [])), d.get("effective", "effective"),
-             _j(d.get("extra", {})), time.time()))
+             _j(d.get("extra", {})), time.time(), d.get("speaker") or "unknown"))
         return int(cur.lastrowid)
+
+    def _speaker(self, claimed: str | None, line_origin: str | None) -> str:
+        """発言者。話者識別はしていないので、利用者が「動画の音声は先生」と確認した場合（semantic.video_speaker:
+        teacher）以外は、音声の発言を先生のものと断定しない。"""
+        if line_origin == "document" or claimed == "document":
+            return "document"
+        if line_origin == "screen" or claimed == "screen":
+            return "screen"
+        confirmed = self.sc.get("video_speaker") == "teacher"
+        if claimed in ("student", "other"):
+            return claimed
+        if confirmed:
+            return "teacher_confirmed"
+        return "teacher_inferred" if claimed == "teacher" else "unknown"
 
     def _verify_local(self, doc_id: int, frow, scenes: list[Scene], mode: str) -> list[tuple[int, list[str]]]:
         """元の発話・画面・資料との機械的な照合。戻り値は要再解析の (指示ID, 問題点)。"""
@@ -307,6 +332,7 @@ class SemanticEngine:
             self._set_doc(did, step="relations")
         link_document(self.db, did)
         self._set_doc(did, step="done", status="done")
+        self._post_checks(frow, "ai", scenes)
         log.info("意味理解 完了: %s", label)
 
     # ---------- 第1回: 場面 ----------
@@ -575,7 +601,9 @@ class SemanticEngine:
             "unconfirmed": unconf, "origin": x.get("origin") if x.get("origin") in ("explicit", "ai_inference") else "ai_inference",
             "extracted_by": analyzer,
             "discourse": _j([rel] if rel != "none" else []),
-            "extra": {"relation_refers_to": x.get("relation_refers_to", ""), "relation_type": rel},
+            "speaker": self._speaker(x.get("speaker"), None if sc.t_start is not None else "document"),
+            "extra": {"relation_refers_to": x.get("relation_refers_to", ""), "relation_type": rel,
+                      "speaker_claimed": x.get("speaker"), "speaker_basis": x.get("speaker_basis", "")},
         }
 
     @staticmethod

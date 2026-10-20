@@ -54,6 +54,7 @@ def parse_chart(zf: zipfile.ZipFile, part: str) -> dict:
     chart = root.find("c:chart", NS)
     info: dict = {"part": part, "title": _texts(chart.find("c:title", NS)) if chart is not None else "",
                   "types": [], "series": [], "axes": []}
+    info["legend"] = chart is not None and chart.find("c:legend", NS) is not None
     pa = chart.find("c:plotArea", NS) if chart is not None else None
     if pa is None:
         return info

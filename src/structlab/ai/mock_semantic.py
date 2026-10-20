@@ -136,12 +136,14 @@ def directive_extraction(text: str) -> dict:
                     "condition": cond, "target_task": "mock作業", "deliverable": "", "audience": "学生", "t_start": ts,
                     "t_end": ts, "screen": "", "operation": "", "speech_quote": content, "context_before": "",
                     "context_after": "", "certainty": "medium", "unconfirmed": "", "origin": "explicit",
+                    "speaker": "teacher" if "[[TEACHER]]" in content else "unknown", "speaker_basis": "",
                     "relation_type": "none", "relation_refers_to": "", "matched_candidates": [n]})
     if "## 対象場面 #1 " in text:
         out.append({"content": "測定データは実験当日中に整理しておく", "directive_class": "recommended", "base_strength": None,
                     "condition": None, "target_task": "データ整理", "deliverable": "", "audience": "学生", "t_start": None,
                     "t_end": None, "screen": "", "operation": "", "speech_quote": "", "context_before": "",
                     "context_after": "", "certainty": "low", "unconfirmed": "mock: 推論", "origin": "ai_inference",
+                    "speaker": "unknown", "speaker_basis": "",
                     "relation_type": "none", "relation_refers_to": "", "matched_candidates": []})
     return {"directives": out, "dismissed_candidates": dismissed}
 
@@ -190,7 +192,33 @@ def corpus_integration(text: str) -> dict:
     }
 
 
+def blind_directives(text: str) -> dict:
+    """独立した再検証: 元の範囲だけから規則で指示を列挙する（[[MISCLASS]] の誤りを含まない）。"""
+    from ..semantic.rules import directives_in
+    out = []
+    for t, _, tx in _lines(_section(text, "## 元の発話・画面・資料")):
+        for rd in directives_in(re.sub(r"\[\[\w+\]\]", "", tx)):
+            if "[[BLINDFLIP]]" in tx:
+                rd.directive_class = "recommended" if rd.directive_class in ("prohibited", "discouraged") else "prohibited"
+            out.append({"content": rd.content, "directive_class": rd.directive_class, "base_strength": rd.base_strength,
+                        "condition": rd.condition, "quote": tx, "t_start": t})
+    return {"directives": out}
+
+
+def style_rewrite(text: str) -> dict:
+    """文章スタイル: 表現だけを置き換える。[[STYLE_BREAK]] で数値を変え、[[STYLE_INVENT]] で文を書き足す（検査のテスト用）。"""
+    body = _section(text, "## 調整する文章（内容は確定済み・変更禁止）\n", "\n## ")
+    out = body.replace("したがって、", "そのため、").replace("であると考えられる。", "だと考えられる。")
+    if "[[STYLE_BREAK]]" in out:
+        out = re.sub(r"\d+", lambda m: str(int(m.group()) + 1), out, count=1)
+    if "[[STYLE_INVENT]]" in out:
+        out += "この実験はとても楽しく、将来の研究にも大いに役立つ貴重な経験となった。"
+    return {"rewritten": out.strip("\n"), "changes": [{"before": "したがって、", "after": "そのため、", "rule_id": "P4-2-0101",
+                                                     "reason": "mock"}], "not_applied": []}
+
+
 TASKS = {"scene_analysis": scene_analysis, "global_synthesis": global_synthesis,
          "global_synthesis_part": global_synthesis, "scene_reinterpret": scene_reinterpret,
          "directive_extraction": directive_extraction, "directive_verify": directive_verify,
-         "corpus_integration": corpus_integration}
+         "corpus_integration": corpus_integration, "blind_directives": blind_directives,
+         "style_rewrite": style_rewrite}

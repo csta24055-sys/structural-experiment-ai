@@ -142,6 +142,11 @@ class VideoProcessor(Processor):
             dur = float(lo.get("duration") or end)
             for s, e, reason in _merge_windows(windows):
                 ex.followups.append(focus_spec(s, e, reason, dur))
+        # 文字起こしの信頼度が低い発話（faster-whisper の平均対数確率・無音確率による目安）
+        ex.data["low_confidence_speech"] = [
+            s["start"] for s in speech
+            if (s.get("avg_logprob") is not None and s["avg_logprob"] < -1.0)
+            or (s.get("no_speech_prob") is not None and s["no_speech_prob"] > 0.6)]
         ex.data.update({"n_speech": len(speech), "n_keyframes": len(keyframes),
                         "keyframes": [{k: v for k, v in kf.items() if k != "ocr"} for kf in keyframes],
                         "transcriber": ctx.transcriber.name, "ocr": ctx.ocr.label})

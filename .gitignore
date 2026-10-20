@@ -229,3 +229,8 @@ dummy_data/
 .env
 .env.*
 !.env.example
+
+# 本人の文章スタイルPDF・その解析結果（個人情報）
+*writing_style*.pdf
+*文章スタイル*.pdf
+style_profile*.json

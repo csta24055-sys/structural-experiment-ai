@@ -68,3 +68,23 @@ semantic:
   # 再解釈・指示抽出でも画像を送るか（送ると精度は上がるが費用が増える）
   reinterpret_images: false
   directive_images: false
+  # 動画の音声の発言者。話者識別はしないので unknown（先生の指示と断定しない）。
+  # 「動画の音声はすべて先生」と確認できたら teacher にする
+  video_speaker: unknown
+
+# 各工程のチェック（AI不使用）。docs/CHECKS.md 参照
+checks:
+  enabled: true
+  # Excel の再計算で読むセル数の上限
+  max_excel_cells: 300000
+  # 独立した再検証（structlab reverify）で1回に扱う件数
+  reverify_limit: 30
+
+# 本人の文章スタイル（最終工程の文章表現の調整だけに使う）。docs/STYLE.md 参照
+style:
+  enabled: false
+  # 文章スタイルPDFの場所（個人情報を含むのでリポジトリには置かない）。どちらか一方
+  pdf_path: ""
+  dropbox_path: ""          # 例: "/鋼材実験レポート用_解析結果/style/writing_style.pdf"（解析対象フォルダの外）
+  max_rules: 120
+  accept_needs_review: false

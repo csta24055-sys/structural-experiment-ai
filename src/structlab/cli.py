@@ -404,6 +404,120 @@ def cmd_show_directive(args) -> int:
     return 0
 
 
+def cmd_checks(args) -> int:
+    cfg = load_config(args.config)
+    from .checks.base import STAGE_LABEL, STATUS_LABEL
+    from .checks.report import summary, write_checks_report
+    db = _open_db(cfg)
+    sm = summary(db)
+    for stg, c in sm.items():
+        print(f"{STAGE_LABEL.get(stg, stg)}: " + "、".join(f"{STATUS_LABEL.get(k, k)} {v}" for k, v in sorted(c.items())))
+    print(f"詳細: {write_checks_report(db, cfg)}")
+    return 0
+
+
+def cmd_reverify(args) -> int:
+    """独立した再検証。AIは --allow-external-ai のときだけ（有料）。"""
+    cfg = load_config(args.config)
+    _setup_logging(cfg, args.verbose)
+    from .ai import make_provider
+    from .checks.report import write_checks_report
+    from .checks.reverify import reverify
+    from .pipeline import Budget
+    db = _open_db(cfg)
+    provider, note = make_provider(cfg, allow_external_flag=args.allow_external_ai)
+    run_id = db.start_run()
+    counts = reverify(db, cfg, provider=provider, budget=Budget(cfg, db, run_id), run_id=run_id, limit=args.limit)
+    db.end_run(run_id, "ok", {"reverify": counts})
+    print(json.dumps({"reverify": counts, "ai": note if provider is None else provider.name}, ensure_ascii=False))
+    print(f"詳細: {write_checks_report(db, cfg)}")
+    return 0
+
+
+def cmd_check_draft(args) -> int:
+    """提出物の下書き（Excel・文章）を元資料・計算・指示と照合する（提出物は作らない）。"""
+    cfg = load_config(args.config)
+    from .checks.deliverable import check_draft
+    from .checks.report import write_checks_report
+    db = _open_db(cfg)
+    counts = check_draft(db, cfg, Path(args.path), fmt=args.format, pages=args.pages)
+    print(json.dumps(counts, ensure_ascii=False))
+    print(f"詳細: {write_checks_report(db, cfg)}")
+    return 0
+
+
+def cmd_style(args) -> int:
+    """文章スタイル（最終工程のみ）。profile: PDFの読み込み、apply: 確定した文章の表現調整。"""
+    cfg = load_config(args.config)
+    from .style.apply import apply_to_markdown, ensure_profile
+    from .style.profile import load_profile
+    if args.action == "profile":
+        prof = ensure_profile(cfg)
+        if prof is None:
+            print("文章スタイルのPDFがありません（style.pdf_path または style.dropbox_path を設定）。他の処理には影響しません。")
+            return 0
+        print(json.dumps(prof["stats"], ensure_ascii=False))
+        print(f"保存先: {cfg.work_dir / 'style' / 'profile.json'}（リポジトリには保存しない）")
+        return 0
+    if args.action == "status":
+        prof = load_profile(cfg.work_dir / "style" / "profile.json")
+        print(json.dumps({"enabled": bool(cfg.data["style"].get("enabled")),
+                          "profile": prof["stats"] if prof else None}, ensure_ascii=False))
+        return 0
+    if not args.input:
+        print("文章ファイルを指定してください: structlab style apply 入力.md --out 出力.md")
+        return 2
+    from .ai import make_provider
+    db = _open_db(cfg)
+    provider, note = make_provider(cfg, allow_external_flag=args.allow_external_ai)
+    src = Path(args.input)
+    md = src.read_text(encoding="utf-8")
+    out_text, runs = apply_to_markdown(db, cfg, md, provider=provider)
+    out = Path(args.out or src.with_name(src.stem + ".styled.md"))
+    out.write_text(out_text, encoding="utf-8")
+    out.with_name(out.stem + ".original.md").write_text(md, encoding="utf-8")  # 適用前を必ず残す
+    print(json.dumps({"ai": note if provider is None else provider.name, "sections": runs}, ensure_ascii=False, default=str))
+    print(f"出力: {out}（適用前: {out.with_name(out.stem + '.original.md')}）")
+    return 0
+
+
+def cmd_feedback(args) -> int:
+    """教授などのフィードバックを、内容を推測せずにそのまま記録する。"""
+    cfg = load_config(args.config)
+    db = _open_db(cfg)
+    if args.action == "add":
+        tt, tid = (args.target.split(":", 1) + [None])[:2] if args.target else (None, None)
+        cur = db.x("INSERT INTO feedback(received_at,author,text,target_type,target_id,suspected_stage,status,note) "
+                   "VALUES(?,?,?,?,?,?, 'open', ?)", (time.time(), args.author, args.text, tt, tid, args.stage, args.note))
+        print(f"フィードバック #{cur.lastrowid} を記録しました。原因の追跡: structlab trace {args.target or '<対象>'}")
+        return 0
+    if args.action == "set":
+        db.x("UPDATE feedback SET suspected_stage=COALESCE(?, suspected_stage), status=COALESCE(?, status), "
+             "note=COALESCE(?, note) WHERE id=?", (args.stage, args.status, args.note, args.id))
+        return 0
+    from .trace import STAGES
+    for r in db.q("SELECT * FROM feedback ORDER BY id"):
+        print(f"#{r['id']} [{r['status']}] {r['author'] or ''}: {r['text']}（対象: {r['target_type'] or '-'}:{r['target_id'] or '-'}"
+              f"／原因の工程: {STAGES.get(r['suspected_stage'] or 'unknown', r['suspected_stage'])}）")
+    return 0
+
+
+def cmd_trace(args) -> int:
+    cfg = load_config(args.config)
+    from .trace import trace_directive, trace_style
+    db = _open_db(cfg)
+    kind, _, tid = args.target.partition(":")
+    try:
+        res = trace_directive(db, int(tid)) if kind == "directive" else trace_style(db, int(tid)) if kind == "style_run" else None
+    except (KeyError, ValueError):
+        res = None
+    if res is None:
+        print("対象が見つかりません（例: structlab trace directive:37 / style_run:3）")
+        return 1
+    print(json.dumps(res, ensure_ascii=False, indent=1, default=str))
+    return 0
+
+
 def cmd_dropbox_auth(args) -> int:
     from dropbox import DropboxOAuth2FlowNoRedirect
     app_key = os.environ.get("DROPBOX_APP_KEY")
@@ -467,6 +581,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=50)
     p = sub.add_parser("show-directive", help="指示1件の全項目（根拠・前後・関連・照合）を表示")
     p.add_argument("id", type=int)
+    sub.add_parser("checks", help="各工程のチェック結果の集計")
+    p = sub.add_parser("reverify", help="独立した再検証（AIは --allow-external-ai のときだけ）")
+    p.add_argument("--allow-external-ai", action="store_true")
+    p.add_argument("--limit", type=int, default=None)
+    p = sub.add_parser("check-draft", help="提出物の下書きを元資料・計算・指示と照合")
+    p.add_argument("path")
+    p.add_argument("--format", default=None, help="提出形式（PDF / Word など）")
+    p.add_argument("--pages", type=int, default=None)
+    p = sub.add_parser("style", help="文章スタイル（最終工程のみ）: profile / status / apply")
+    p.add_argument("action", choices=["profile", "status", "apply"])
+    p.add_argument("input", nargs="?")
+    p.add_argument("--out")
+    p.add_argument("--allow-external-ai", action="store_true")
+    p = sub.add_parser("feedback", help="教授などのフィードバックの記録: add / list / set")
+    p.add_argument("action", choices=["add", "list", "set"])
+    p.add_argument("text", nargs="?", default="")
+    p.add_argument("--id", type=int)
+    p.add_argument("--target", help="例: directive:37 / style_run:3")
+    p.add_argument("--author")
+    p.add_argument("--stage", choices=["extraction", "understanding", "directives", "calculation", "writing", "unknown"])
+    p.add_argument("--status", choices=["open", "investigating", "resolved"])
+    p.add_argument("--note")
+    p = sub.add_parser("trace", help="結果がどの工程を経て作られたかを表示（例: directive:37）")
+    p.add_argument("target")
     p = sub.add_parser("dropbox-auth")
     p.add_argument("step", choices=["start", "finish"])
     p.add_argument("code", nargs="?")
@@ -474,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"init": cmd_init, "check": cmd_check, "scan": cmd_scan, "run": cmd_run, "status": cmd_status,
                 "report": cmd_report, "retry": cmd_retry, "reanalyze": cmd_reanalyze, "errors": cmd_errors,
+                "style": cmd_style, "feedback": cmd_feedback, "trace": cmd_trace,
+                "checks": cmd_checks, "reverify": cmd_reverify, "check-draft": cmd_check_draft,
                 "estimate": cmd_estimate, "search": cmd_search, "show-directive": cmd_show_directive,
                 "dropbox-auth": cmd_dropbox_auth}[args.cmd](args)
     except ConfigError as e:

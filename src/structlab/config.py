@@ -93,6 +93,28 @@ DEFAULTS: dict[str, Any] = {
         "max_synthesis_chars": 200000,
         "corpus_max_chars": 300000,
         "corpus_partial": False,
+        # 動画の音声の発言者。話者識別はしないので既定は unknown（先生の指示と断定しない）。
+        # 利用者が「動画の音声はすべて先生」と確認した場合のみ teacher にする
+        "video_speaker": "unknown",
+    },
+    "checks": {
+        # 各工程のチェック（AI不使用）。既存の検証に足りない部分だけを行う
+        "enabled": True,
+        "max_excel_cells": 300000,
+        "max_detail_rows": 500,
+        # 独立した再検証（structlab reverify）で1回に扱う件数の上限
+        "reverify_limit": 30,
+    },
+    "style": {
+        # 文章スタイルの適用（最終工程のみ）。既定は無効
+        "enabled": False,
+        # 本人の文章の特徴をまとめたPDF（ローカルパス、または dropbox_path）。リポジトリには置かない
+        "pdf_path": "",
+        "dropbox_path": "",
+        # 適用に使う項目数の上限（全項目を機械的に適用しない）
+        "max_rules": 120,
+        # 適用後の検査で「要確認」が出た場合も採用するか（既定: 採用せず元の文章を最終版にする）
+        "accept_needs_review": False,
     },
 }
 
@@ -183,6 +205,11 @@ class Config:
         ai = self.data["ai"]
         if ai["provider"] not in ("none", "mock", "anthropic"):
             raise ConfigError(f"ai.provider が不正です: {ai['provider']}")
+        sp = (self.data.get("style", {}).get("dropbox_path") or "").rstrip("/").lower()
+        if sp and st == "dropbox" and src and (sp + "/").startswith(src.lower() + "/"):
+            raise ConfigError("style.dropbox_path は解析対象フォルダの外に置いてください（実験資料として解析されないように）")
+        if self.data.get("semantic", {}).get("video_speaker", "unknown") not in ("unknown", "teacher"):
+            raise ConfigError("semantic.video_speaker は unknown か teacher を指定してください")
         tb = self.data["transcription"]["backend"]
         if tb not in ("none", "mock", "faster_whisper"):
             raise ConfigError(f"transcription.backend が不正です: {tb}")

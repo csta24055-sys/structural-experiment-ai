@@ -134,6 +134,8 @@ DIRECTIVE_ITEM = _obj({
     "context_before": _S, "context_after": _S,
     "certainty": CERTAINTY, "unconfirmed": _S,
     "origin": {"type": "string", "enum": ["explicit", "ai_inference"]},
+    "speaker": {"type": "string", "enum": ["teacher", "student", "other", "unknown", "document", "screen"]},
+    "speaker_basis": _S,
     "relation_type": {"type": "string", "enum": ["none", *DISCOURSE_TYPES]},
     "relation_refers_to": _S,
     "matched_candidates": _AI,
@@ -155,6 +157,8 @@ DIRECTIVE_INSTRUCTION = f"""## 作業（第2回: 指示・禁止事項・注意�
 - 1つの発言に複数の指示があれば別々に、1つの指示に複数の分類が関わる場合は unconfirmed に関係を書く。
 - 判断できないものは other とし、unconfirmed に理由を書く。
 - origin: 発言・画面・資料に明示されていれば explicit、あなたの推論なら ai_inference。
+- speaker: 誰の発言・記述か。音声から話者を確実に判別できない場合は unknown とし、推測で teacher にしない。
+  teacher とする場合はその根拠（例:「先生自身が『私が』と名乗っている」）を speaker_basis に書く。資料の記述は document、画面の文字は screen。
 - speech_quote には根拠となる発言・資料の原文をそのまま引用する（要約しない）。
 - 訂正・補足・例外・条件変更であれば relation_type と、何に対するものか relation_refers_to を書く。
 - 「規則による候補」は言い回しから機械的に拾ったもので、見落とし防止のために必ず全件確認すること。

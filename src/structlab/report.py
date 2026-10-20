@@ -103,6 +103,11 @@ def collect_status(db: DB, cfg=None) -> dict:
         "waiting_upload": waiting, "problems": problems,
         "recent_errors": [{k: e[k] for k in ("created_at", "stage", "path", "message")} for e in errors],
     }
+    try:
+        from .checks.report import summary as _check_summary
+        st["checks"] = _check_summary(db)
+    except Exception:  # noqa: BLE001
+        st["checks"] = {}
     if st["last_run"]:
         st["last_run"]["started_at"] = _iso(st["last_run"]["started_at"])
         st["last_run"]["ended_at"] = _iso(st["last_run"]["ended_at"]) if st["last_run"]["ended_at"] else None
@@ -145,6 +150,11 @@ def status_markdown(st: dict) -> str:
     if st["problems"]:
         L += ["", "## 要対応"] + [f"- [{STATUS_LABELS.get(p['status'], p['status'])}] {p['path']}: {p['status_detail'] or p['last_error'] or ''}"
                                   for p in st["problems"]]
+    if st.get("checks"):
+        from .checks.base import STAGE_LABEL, STATUS_LABEL
+        L += ["", "## 各工程のチェック（詳細は checks/checks.md）"]
+        for stg, c in st["checks"].items():
+            L.append(f"- {STAGE_LABEL.get(stg, stg)}: " + "、".join(f"{STATUS_LABEL.get(k, k)} {v}" for k, v in sorted(c.items())))
     if st["recent_errors"]:
         L += ["", "## 最近のエラー（未解決・新しい順）"] + [f"- {e['created_at']} [{e['stage']}] {e['path'] or ''}: {e['message']}"
                                                   for e in st["recent_errors"]]
@@ -307,6 +317,9 @@ def write_reports(db: DB, cfg) -> dict[str, Path]:
     if cfg.data.get("semantic", {}).get("enabled"):
         from .semantic.report import write_semantic_reports
         paths.update({f"semantic_{k}": v for k, v in write_semantic_reports(db, cfg).items()})
+    if cfg.data.get("checks", {}).get("enabled", True):
+        from .checks.report import write_checks_report
+        paths["checks"] = write_checks_report(db, cfg)
 
     st = collect_status(db, cfg)
     (out / "status.md").write_text(status_markdown(st), encoding="utf-8")

@@ -173,8 +173,9 @@ class FasterWhisperTranscriber(Transcriber):
         with wave.open(str(wav)) as w:
             audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
         segs, _ = self.model.transcribe(audio, language=self.language, vad_filter=True)
-        return [{"start": offset + s.start, "end": offset + s.end, "text": s.text.strip()} for s in segs
-                if s.text.strip()]
+        return [{"start": offset + s.start, "end": offset + s.end, "text": s.text.strip(),
+                 "avg_logprob": getattr(s, "avg_logprob", None), "no_speech_prob": getattr(s, "no_speech_prob", None)}
+                for s in segs if s.text.strip()]
 
 
 def make_transcriber(cfg) -> Transcriber:

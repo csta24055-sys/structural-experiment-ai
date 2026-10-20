@@ -111,6 +111,21 @@ class Pipeline:
         self.stats["ai_calls"] += 1
         return resp
 
+    def _run_extraction_checks(self, row, local_path: Path | None) -> None:
+        """資料抽出工程に組み込んだチェック（時刻対応・文字起こし・OCR・数値・数式・Excel再計算・読み取り失敗）。"""
+        if not self.cfg.data.get("checks", {}).get("enabled", True):
+            return
+        from .checks.extraction import check_file
+        row = self.db.q1("SELECT * FROM files WHERE id=?", (row["id"],))
+        try:
+            check_file(self.db, self.cfg, row, local_path, self.run_id)
+        except (StopRun, DiskSpaceError):
+            raise
+        except Exception as e:  # noqa: BLE001  チェックの失敗で解析結果を失わない
+            self.db.log_error(run_id=self.run_id, stage="checks:extraction", message=str(e),
+                              detail=traceback.format_exc(), file_id=row["id"])
+            log.error("抽出チェックに失敗 %s: %s", row["path"], e)
+
     def _run_semantic(self, row, local_path: Path | None) -> None:
         row = self.db.q1("SELECT * FROM files WHERE id=?", (row["id"],))
         try:
@@ -165,6 +180,9 @@ class Pipeline:
             self.semantic.backfill()
             from .semantic.corpus import integrate
             integrate(self.semantic)
+            if self.cfg.data.get("checks", {}).get("enabled", True):
+                from .checks.integration import check_corpus
+                check_corpus(self.db, self.run_id)
         except StopRun as e:
             log.warning("処理を中断しました: %s（次回の実行で続きから再開します）", e)
         except DiskSpaceError as e:
@@ -244,6 +262,7 @@ class Pipeline:
             else:
                 finished = self._process_units(row, local_path)
                 if finished:
+                    self._run_extraction_checks(row, local_path)
                     self._run_semantic(row, local_path)  # 元ファイルが手元にあるうちに（照合時の再取得用）
         except StopRun:
             self._set_file(fid, "ready", "中断（次回続きから）")

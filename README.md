@@ -14,6 +14,13 @@
 根拠（資料名・時刻・画面・発言・前後の文脈）付きで抽出し、元の映像・音声と再照合します。複数の動画・PDF・Excel説明を横断した統合理解も作ります。
 AI を使わない部分（言い回しによる指示抽出・訂正/例外/矛盾の検出・網羅率）は常に動き、AI の部分は明示的に許可したときだけ動きます。
 
+**各工程のチェック**（[docs/CHECKS.md](docs/CHECKS.md)）: 抽出（音声と映像の時刻対応・文字起こし・OCR・数値・数式・Excelの再計算）、
+理解（根拠・前後の整合・訂正）、指示（発言者・対象・条件）、統合（資料間の数値・提出条件）の各工程に検査を組み込み、
+成功・不一致・要確認・未検証を区別して記録します。独立した再検証（`structlab reverify`）もできます。
+
+**文章スタイル**（[docs/STYLE.md](docs/STYLE.md)）: 本人の文章の特徴をまとめたPDFは、内容が確定した後の文章表現の調整にだけ使います（既定は無効）。
+**フィードバック**: 教授などの指摘を記録し（`structlab feedback`）、結果がどの工程（読み取り・意味理解・指示抽出・計算・文章生成）を経て作られたかを追跡できます（`structlab trace`）。
+
 ---
 
 ## 1. どこで動かすか（推奨構成）
@@ -78,6 +85,13 @@ structlab report               # 結果ファイルを再生成
 structlab estimate             # AI解析（有料）の呼び出し回数・概算費用（APIは呼ばない）
 structlab search 中央値         # 指示・場面の理解を検索（出典の時刻付き）
 structlab show-directive 37    # 指示1件の根拠・前後・関連・照合結果
+structlab checks               # 各工程のチェック結果の集計
+structlab reverify             # 独立した再検証（AIは --allow-external-ai のときだけ）
+structlab check-draft 下書き.md  # 提出物の下書きを元資料・計算・指示と照合（提出物は作らない）
+structlab style profile        # 文章スタイルPDFの読み込み（最終工程用）
+structlab style apply 確定稿.md --out 調整後.md
+structlab feedback add "指摘の文" --target directive:37 --author 教授
+structlab trace directive:37   # その指示が作られた工程（抽出→理解→指示→照合）をたどる
 ```
 
 設定ファイルは `-c` で指定します（既定 `config.yaml`、`scripts/run_analysis.sh` は `configs/dropbox.yaml`）。
@@ -94,6 +108,7 @@ structlab show-directive 37    # 指示1件の根拠・前後・関連・照合�
 | `timelines/*.md` | 動画ごとの「発話 ↔ その時の画面」対応表と重要場面 |
 | `files/*.json` | ファイル別の詳細（ページごとの表・数式候補、Excel の数式・グラフ定義など） |
 | `status.md` / `status.json` | 処理状況・API使用量・エラー |
+| `checks/checks.md` / `checks.json` | 各工程のチェック結果（成功・不一致・要確認・未検証）と修正案 |
 | `semantic/` | 意味理解層の出力: 場面ごとの意味解析、資料全体の理解、指示一覧（A〜H・根拠付き）、統合要件、実験全体の理解、未確認事項、矛盾、訂正・補足・例外、失敗箇所、解析網羅率（[docs/SEMANTIC.md](docs/SEMANTIC.md)） |
 
 10分類: 1.実験の目的・概要 / 2.実験手順 / 3.測定データ / 4.Excel作成方法 / 5.レポート作成方法 / 6.必要な計算式・グラフ / 7.提出物の要件 / 8.先生の指示 / 9.注意事項・禁止事項 / 10.不明点・矛盾
@@ -155,6 +170,8 @@ python3 -m pytest -q -m "not slow" # 時間のかかるもの以外
 ## 9. ドキュメント
 
 - [docs/SEMANTIC.md](docs/SEMANTIC.md) — 意味理解層（局所理解・全体理解・指示の抽出と照合・資料横断）
+- [docs/CHECKS.md](docs/CHECKS.md) — 各工程のチェックと独立した再検証
+- [docs/STYLE.md](docs/STYLE.md) — 本人の文章スタイル（最終工程のみ）
 - [docs/SETUP_DROPBOX.md](docs/SETUP_DROPBOX.md) — Dropbox 接続設定
 - [docs/SETUP_AI.md](docs/SETUP_AI.md) — AI解析サービス・文字起こしの設定
 - [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md) — iPhone からクラウドで実行する手順（Claude Code / GitHub Actions）

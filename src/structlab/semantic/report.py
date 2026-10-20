@@ -40,6 +40,9 @@ EFF_LABEL = {"effective": "有効", "superseded": "訂正により無効", "unre
 REL_LABEL = {"correction_of": "訂正", "supplement_to": "補足", "exception_to": "例外", "condition_change_of": "条件変更",
              "conflicts_with": "矛盾", "same_as": "同一・繰り返し", "corroborated_by": "規則候補と一致"}
 ORIGIN_LABEL = {"explicit": "明示", "ai_inference": "AIの推論"}
+SPEAKER_LABEL = {"teacher_confirmed": "先生（利用者が確認済み）", "teacher_inferred": "先生とAIが推定（未確認）",
+                 "unknown": "発言者未確認（先生の指示と断定していない）", "document": "資料の記述", "screen": "画面の表示",
+                 "student": "学生", "other": "その他"}
 OPEN_VER = ("needs_review", "omission_candidate", "class_mismatch_unresolved", "found_in_verify", "unverified")
 
 
@@ -73,6 +76,9 @@ def directive_record(db: DB, d) -> dict:
         "context_before": d["context_before"], "context_after": d["context_after"],
         "certainty": d["certainty"], "unconfirmed": d["unconfirmed"],
         "origin": d["origin"], "origin_label": ORIGIN_LABEL.get(d["origin"], d["origin"]),
+        "speaker": d["speaker"] or "unknown",
+        "speaker_label": SPEAKER_LABEL.get(d["speaker"] or "unknown", d["speaker"]),
+        "speaker_basis": extra.get("speaker_basis", ""),
         "extracted_by": d["extracted_by"], "marker": d["marker"], "discourse": json.loads(d["discourse"] or "[]"),
         "verification": d["verification"], "verification_label": VER_LABEL.get(d["verification"], d["verification"]),
         "verification_notes": json.loads(d["verification_notes"] or "[]"),
@@ -82,8 +88,8 @@ def directive_record(db: DB, d) -> dict:
 
 
 def _fmt_dir(r: dict) -> str:
-    tags = [f"出典: {r['source']} {r['time_label']}".rstrip(), r["origin_label"], f"確実性: {r['certainty']}",
-            r["verification_label"]]
+    tags = [f"出典: {r['source']} {r['time_label']}".rstrip(), r["origin_label"], f"発言者: {r['speaker_label']}",
+            f"確実性: {r['certainty']}", r["verification_label"]]
     if r["effective"] != "effective":
         tags.append(r["effective_label"])
     s = f"- **#{r['id']}** {r['content']}"
@@ -298,7 +304,8 @@ def write_semantic_reports(db: DB, cfg) -> dict[str, Path]:
     shown = [r for r in recs if r["effective"] not in ("merged", "dismissed", "rejected")]
     D = ["# 指示・禁止事項・注意事項の一覧", "",
          "> 網羅性を重視し、規則で拾った候補も含めて掲載しています。「要確認」「見落とし候補」「AIの推論」は必ず元の資料・動画の該当時刻で確認してください。",
-         f"> 掲載 {len(shown)} 件（AI抽出と一致して統合した規則候補・照合で否定されたものは除外。directives.json には全件）", ""]
+         f"> 掲載 {len(shown)} 件（AI抽出と一致して統合した規則候補・照合で否定されたものは除外。directives.json には全件）",
+         "> 発言者: 話者識別は行っていません。「先生（利用者が確認済み）」以外の音声の指示は、先生の指示と断定していません。", ""]
     for cls, lbl in DIRECTIVE_CLASSES.items():
         rs = [r for r in shown if r["class"] == cls]
         D += [f"## {lbl}（{len(rs)}件）", *([_fmt_dir(r) for r in rs] or ["（該当なし）"]), ""]

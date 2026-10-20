@@ -238,7 +238,76 @@ CREATE TABLE IF NOT EXISTS directive_links (
     status TEXT NOT NULL DEFAULT 'recorded',  -- recorded / unresolved / resolved_explicit
     UNIQUE(from_id, to_id, relation)
 );
+
+-- ===== 各工程のチェック結果 =====
+-- status: ok（成功）/ mismatch（不一致）/ needs_review（要確認）/ unverified（未検証）/ failed（チェック自体が実行できない）
+CREATE TABLE IF NOT EXISTS checks (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER,
+    stage TEXT NOT NULL,            -- extraction / understanding / directives / integration / deliverable / style / reverify
+    check_type TEXT NOT NULL,
+    file_id INTEGER,
+    unit_id INTEGER,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    expected TEXT,
+    actual TEXT,
+    detail TEXT,
+    input_hash TEXT NOT NULL DEFAULT '',
+    created_at REAL,
+    UNIQUE(stage, check_type, target_type, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_checks_status ON checks(stage, status);
+
+-- 独立した再検証などで、修正前後の内容と理由を残す
+CREATE TABLE IF NOT EXISTS revisions (
+    id INTEGER PRIMARY KEY,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    before TEXT,
+    after TEXT,
+    reason TEXT,
+    source TEXT,                    -- reverify / stage3 / user
+    status TEXT NOT NULL DEFAULT 'proposed',   -- proposed（提案のみ）/ applied
+    created_at REAL
+);
+
+-- 教授などからのフィードバック（内容は推測せず、受け取ったまま保存し、原因の工程を追跡する）
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY,
+    received_at REAL,
+    author TEXT,
+    text TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    suspected_stage TEXT,           -- extraction / understanding / directives / calculation / writing / unknown
+    status TEXT NOT NULL DEFAULT 'open',
+    note TEXT
+);
+
+-- 文章スタイルの適用（最終工程のみ）。適用前の文章を必ず保存する
+CREATE TABLE IF NOT EXISTS style_runs (
+    id INTEGER PRIMARY KEY,
+    created_at REAL,
+    profile_hash TEXT,
+    input_hash TEXT NOT NULL,
+    section TEXT,
+    original TEXT NOT NULL,
+    styled TEXT,
+    final TEXT,
+    status TEXT NOT NULL,           -- applied / kept_original / skipped / failed
+    rules_json TEXT,
+    verification_json TEXT,
+    analyzer TEXT
+);
 """
+
+# 既存のDBに後から追加した列（後方互換のため ALTER TABLE で追加する）
+MIGRATIONS = [
+    ("directives", "speaker", "TEXT"),
+]
 
 
 class DB:
@@ -250,6 +319,10 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        for table, col, typ in MIGRATIONS:
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         self.set_kv("schema_version", str(SCHEMA_VERSION))
 
     def close(self) -> None:

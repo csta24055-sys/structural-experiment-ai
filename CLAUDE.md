@@ -13,6 +13,15 @@
 - 認証情報（DROPBOX_APP_KEY, DROPBOX_REFRESH_TOKEN, ANTHROPIC_API_KEY）が無い場合は、チャットに貼らせず、クラウド環境の設定に環境変数として登録してもらう（docs/SETUP_DROPBOX.md）
 - 途中で止まっても同じコマンドで続きから再開できる
 
+## チェック・再検証・文章スタイル・フィードバック
+- 各工程のチェック結果は `results/checks/checks.md`。「未検証」は成功ではないと伝える
+- `structlab reverify` は規則のみなら無料。`--allow-external-ai` を付ける場合は有料なので事前に承認を得る
+- 本人の文章スタイルPDFは最終工程（確定した文章の表現調整）にだけ使う。解析・指示判断・計算・評価には使わない。
+  PDFと `work/style/profile.json` は個人情報なのでコミットしない（Dropbox の解析対象フォルダの外か作業ディレクトリに置く）
+- 教授のフィードバックは `structlab feedback add` で受け取ったまま記録し、`structlab trace` で原因の工程を一緒に確認する。
+  フィードバックを受け取る前に、その内容を推測して実装しない
+- 話者識別はしていない。動画の音声を「先生の指示」と断定しない（利用者が確認した場合のみ `semantic.video_speaker: teacher`）
+
 ## 守ること
 - 実際の資料・解析結果（`work/`）・`config.yaml`・`.env` をコミットしない
 - 元資料フォルダ（`/鋼材実験レポート用`）には書き込まない
