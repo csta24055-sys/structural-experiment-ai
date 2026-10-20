@@ -6,8 +6,8 @@
 | 名前 | 値 | 秘密か |
 |---|---|---|
 | `DROPBOX_APP_KEY` | App Console の App key | 秘密扱い |
-| `DROPBOX_APP_SECRET` | App Console の App secret（下の手順A-3の方法で取得したトークンの更新に必要） | **秘密** |
-| `DROPBOX_REFRESH_TOKEN` | 手順A-3で得るリフレッシュトークン（取り消すまで有効） | **秘密** |
+| `DROPBOX_APP_SECRET` | App Console の App secret（下の手順A-2のショートカットで取得したトークンの更新に必要） | **秘密** |
+| `DROPBOX_REFRESH_TOKEN` | 手順A-2・A-3で得るリフレッシュトークン（取り消すまで有効） | **秘密** |
 
 **どの値も、チャット・GitHub のコード・ログには貼らないでください。** 登録先は GitHub の Secrets（または Claude Code のクラウド環境の環境変数）だけです。
 プログラムは値を表示せず、接続確認の出力でも秘密の値は伏せ字にします。
@@ -35,17 +35,7 @@ GitHub Secrets はワークフローの中でだけ使え、Claude Code のセ�
    - `files.content.read`（ダウンロード）
    - `files.content.write` は最初はチェック不要（手順B で解析結果の保存を始めるときに追加）
 
-### A-2. 許可してコードを得る（Safari）
-次の URL の最後に App key を付けて Safari で開き、「続行」「許可」を押します。
-URL の `scope=` で読み取りの2つだけを求めるので、アプリ側で書き込み権限を付けていても読み取り専用のトークンになります。
-
-```
-https://www.dropbox.com/oauth2/authorize?response_type=code&token_access_type=offline&scope=files.metadata.read%20files.content.read&client_id=
-```
-
-表示された **アクセスコード** をコピーします（一度しか使えず、数分で失効します）。
-
-### A-3. コードをリフレッシュトークンに交換する（ショートカット App）
+### A-2. 先にショートカットを作る（コードをリフレッシュトークンに交換する）
 トークンを画面にもチャットにも出さず、直接クリップボードへ入れるためにショートカットを使います。
 「ショートカット」App →「＋」で新規作成し、次の4つのアクションを順に追加します。
 
@@ -59,8 +49,25 @@ https://www.dropbox.com/oauth2/authorize?response_type=code&token_access_type=of
 3. **辞書の値を取得**: キーに `refresh_token`
 4. **クリップボードにコピー**
 
-A-2 のコードをコピーした状態でショートカットを実行し、「コード」にペーストすると、リフレッシュトークンがクリップボードに入ります。
+A-3 でコードをコピーした状態でショートカットを実行し、「コード」にペーストすると、リフレッシュトークンがクリップボードに入ります。
 （終わったらショートカットは削除して構いません。App secret が中に残るため。）
+
+### A-3. 許可してコードを得る（Safari）
+次の URL の最後に App key を付けて Safari で開き、「続行」「許可」を押します。
+URL の `scope=` で読み取りの2つだけを求めるので、アプリ側で書き込み権限を付けていても読み取り専用のトークンになります。
+
+```
+https://www.dropbox.com/oauth2/authorize?response_type=code&token_access_type=offline&scope=files.metadata.read%20files.content.read&client_id=
+```
+
+表示された **アクセスコード** をコピーし、すぐに A-2 のショートカットを実行します（コードは一度しか使えず、数分で失効します）。
+コードはチャットに貼らないでください。
+
+**Full Dropbox か App folder かの見分け方**（Settings に Access type が出ない場合）
+- 許可画面で、アクセス先が「アプリ（Apps）」内の専用フォルダと書かれていれば App folder
+- 許可した後、Dropbox の最上位に「アプリ」（Apps）フォルダとその中に「鋼材実験」フォルダが新しくできていれば App folder
+- 確実なのは A-5 の接続確認: `/鋼材実験レポート用` が見えれば Full Dropbox。App folder の場合は「何も見えない」と表示されます
+
 
 ### A-4. GitHub Secrets に登録する（Safari）
 GitHub アプリでは Secrets を編集できないので Safari で開きます:
@@ -70,7 +77,7 @@ https://github.com/csta24055-sys/structural-experiment-ai/settings/secrets/actio
 
 | Name | Secret |
 |---|---|
-| `DROPBOX_REFRESH_TOKEN` | A-3 でクリップボードに入った値をペースト（**最初に**登録） |
+| `DROPBOX_REFRESH_TOKEN` | A-2 のショートカットでクリップボードに入った値をペースト（**最初に**登録） |
 | `DROPBOX_APP_KEY` | App key |
 | `DROPBOX_APP_SECRET` | App secret |
 
@@ -89,7 +96,7 @@ GitHub Actions の **Connection check** を起動してログを読み、結果�
 プログラムが出力フォルダの外への書き込みを拒否します）。クラウドの使い捨て環境で再開できるようにするため必要です。
 
 1. App Console の「Permissions」で `files.content.write` にもチェック → Submit
-2. A-2 の URL の `scope=` を `files.metadata.read%20files.content.read%20files.content.write` にして開き直し、A-3・A-4（`DROPBOX_REFRESH_TOKEN` だけ更新）を行う
+2. A-3 の URL の `scope=` を `files.metadata.read%20files.content.read%20files.content.write` にして開き直し、ショートカット（A-2）と A-4（`DROPBOX_REFRESH_TOKEN` だけ更新）を行う
 
 ## 手順C: PC のターミナル・Claude Code のセッションで取得する（PKCE。App secret 不要）
 
