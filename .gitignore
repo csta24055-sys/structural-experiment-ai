@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- structlab: 実データ・解析結果・秘密情報はコミットしない ----
+config.yaml
+work/
+dummy_data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example

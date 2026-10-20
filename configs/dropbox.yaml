@@ -1,0 +1,45 @@
+# クラウド実行（Claude Code on the web / GitHub Actions）用の設定。秘密情報は含めないこと。
+# 環境変数: DROPBOX_APP_KEY, DROPBOX_REFRESH_TOKEN, (AIを使う場合) ANTHROPIC_API_KEY
+
+source:
+  type: dropbox
+  path: "/鋼材実験レポート用"
+
+output:
+  work_dir: "./work"
+  # 解析結果と処理状況DB(state.db)の保存先。解析対象フォルダの外側。
+  # クラウドのコンテナは使い捨てなので、ここに保存しておくと次回は続きから再開できる。
+  dropbox_path: "/鋼材実験レポート用_解析結果"
+  sync_state: true
+  sync_interval_minutes: 10
+
+stability:
+  min_age_seconds: 600
+  min_stable_seconds: 600
+
+limits:
+  max_file_size_mb: 20000
+  min_free_disk_mb: 3000
+  max_runtime_minutes: 0
+  max_attempts: 3
+
+video:
+  segment_seconds: 120
+
+transcription:
+  backend: faster_whisper
+  model: small
+  language: ja
+
+ocr:
+  backend: auto
+
+ai:
+  provider: anthropic
+  # false のまま。外部送信は実行時に --allow-external-ai を付けたときだけ行う。
+  allow_external: false
+  model: "claude-opus-5-5"
+  effort: "medium"
+  max_calls_per_run: 300
+  max_input_tokens_per_run: 3000000
+  max_output_tokens_per_run: 600000

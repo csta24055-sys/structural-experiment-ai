@@ -1,0 +1,56 @@
+# Dropbox の資料を解析する（手動実行）。GitHub アプリの Actions タブから Run workflow で起動できます。
+# 結果と処理状況は Dropbox の出力フォルダにのみ保存し、GitHub（Artifacts を含む）には保存しません。
+name: Analyze materials
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_external_ai:
+        description: "Claude（外部AI）へ資料を送信して解析する"
+        type: boolean
+        default: false
+      max_runtime_minutes:
+        description: "この時間（分）で安全に停止し、次回続きから"
+        type: number
+        default: 330
+
+permissions:
+  contents: read
+
+concurrency:
+  group: analyze-materials
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      STRUCTLAB_CONFIG: configs/dropbox.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg tesseract-ocr tesseract-ocr-jpn
+      - name: Cache Whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ runner.os }}-small
+      - name: Python packages
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e . faster-whisper
+      - name: Analyze
+        run: |
+          FLAGS="--max-runtime ${{ inputs.max_runtime_minutes }}"
+          if [ "${{ inputs.allow_external_ai }}" = "true" ]; then FLAGS="$FLAGS --allow-external-ai"; fi
+          scripts/run_analysis.sh $FLAGS

@@ -1,0 +1,119 @@
+# structlab 設定例。コピーして config.yaml として使ってください（config.yaml は .gitignore 済み）。
+#   cp config.example.yaml config.yaml
+# APIキー・トークンはこのファイルに書かず、環境変数で渡してください（README 参照）。
+
+source:
+  # dropbox | local
+  type: dropbox
+  # 解析対象フォルダ（Dropbox のパス、または type: local の場合はローカルディレクトリ）
+  path: "/鋼材実験レポート用"
+
+output:
+  # 作業ディレクトリ（SQLite・解析結果・一時ファイル）。リポジトリ内の work/ は .gitignore 済み。
+  work_dir: "./work"
+  # 解析結果と処理状況DBを Dropbox にも保存する場合のフォルダ。
+  # 解析対象フォルダの外側である必要があります（内側だとエラーで停止します）。
+  # 空文字なら Dropbox には一切書き込みません（読み取り専用トークンで運用可能）。
+  dropbox_path: ""
+  # Dropbox 上の state.db を起動時に取得して続きから再開するか（クラウド実行向け）
+  sync_state: true
+  # 実行中に state.db / 結果を Dropbox へ保存する間隔（分）
+  sync_interval_minutes: 15
+
+stability:
+  # アップロード途中のファイルを誤解析しないため、サーバー更新時刻からこの秒数が経過するまで待つ
+  min_age_seconds: 300
+  # 前回スキャン時からハッシュ・サイズが変わっていれば、さらにこの秒数待つ
+  min_stable_seconds: 300
+  # 無視するファイル名パターン（一時ファイル・ロックファイル等）
+  ignore_patterns:
+    - "~$*"
+    - ".~lock.*"
+    - "*.tmp"
+    - "*.part"
+    - "*.crdownload"
+    - ".DS_Store"
+    - "desktop.ini"
+    - "Thumbs.db"
+    - ".dropbox*"
+  # 内容が完全に同一（Dropbox content_hash 一致）のファイルは1回だけ解析する
+  dedupe_identical_content: true
+
+limits:
+  # これより大きいファイルは解析せず「skipped」として記録（MB）
+  max_file_size_mb: 20000
+  # ダウンロード前にこの空き容量（MB）+ファイルサイズが確保できなければ待機
+  min_free_disk_mb: 2000
+  # 1回の実行でダウンロードする上限（MB）。0 は無制限
+  max_download_mb_per_run: 0
+  # 1回の実行の最大時間（分）。超えたら安全に停止し、次回続きから再開。0 は無制限
+  max_runtime_minutes: 0
+  # 失敗した単位の自動再試行回数
+  max_attempts: 3
+  # ダウンロードした元ファイルを解析後も残すか（false 推奨: ディスク節約）
+  keep_downloads: false
+
+zip:
+  max_total_uncompressed_mb: 20000
+  max_files: 5000
+  max_compression_ratio: 200
+  max_nesting_depth: 2
+
+pdf:
+  # AI に渡すページ画像の解像度
+  render_dpi: 110
+  # 1ページあたりの抽出テキスト上限（文字）。超過分は分割
+  max_chars_per_unit: 12000
+
+video:
+  # 音声・映像を処理する時間区間（秒）
+  segment_seconds: 120
+  # シーン変化検出用のサンプリング間隔（秒）
+  sample_interval_seconds: 2.0
+  # キーフレームとみなす画面変化量（変化した画素の割合 0〜1）。画面録画なら 0.01〜0.05 程度
+  scene_change_threshold: 0.02
+  # 1区間で保存・解析するキーフレーム上限
+  max_keyframes_per_segment: 6
+  # 重要場面で追加解析を行うか
+  focus_analysis: true
+  # 重要場面とみなす発話キーワード
+  important_keywords: ["重要", "大事", "必ず", "注意", "提出", "締切", "期限", "禁止", "ダメ", "間違え", "ポイント", "覚えて", "レポート", "グラフ", "式"]
+
+excel:
+  # 1単位あたりの行数（大きなシートを分割）
+  rows_per_unit: 500
+  max_cells_per_unit: 20000
+
+transcription:
+  # none | faster_whisper | mock（テスト用）
+  backend: none
+  model: small
+  language: ja
+  device: cpu
+  compute_type: int8
+
+ocr:
+  # auto: tesseract があれば使う / none: 使わない
+  backend: auto
+  languages: "jpn+eng"
+
+ai:
+  # none（AIを使わずローカル抽出のみ）| anthropic | mock（テスト用）
+  provider: none
+  # 外部AIサービスへ資料（画像・テキスト）を送信してよいか。true にしない限り送信しません。
+  allow_external: false
+  model: "claude-opus-5-5"
+  effort: "medium"
+  max_output_tokens: 8000
+  # 拒否応答時にサーバー側で別モデルへフォールバック（Anthropic の server-side fallbacks）
+  use_fallbacks: true
+  # 1回の呼び出しに含める画像の上限
+  max_images_per_call: 6
+  # 画像の長辺ピクセル上限（送信前に縮小）
+  max_image_edge: 1568
+  # API使用量の上限（1回の実行あたり）。0 は無制限
+  max_calls_per_run: 300
+  max_input_tokens_per_run: 3000000
+  max_output_tokens_per_run: 600000
+  # 累計の呼び出し上限。0 は無制限
+  max_calls_total: 0

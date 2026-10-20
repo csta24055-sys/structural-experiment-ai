@@ -1,0 +1,19 @@
+# 必須ライブラリ（pip install -r requirements.txt）
+PyYAML>=6.0
+dropbox>=12.0
+pymupdf>=1.24
+openpyxl>=3.1
+pillow>=10.0
+numpy>=1.26
+pillow-heif>=0.16   # iPhone の写真（HEIC）
+
+# AI解析（Anthropic Claude を使う場合）
+anthropic>=1.0
+
+# テスト用
+pytest>=8.0
+reportlab>=4.0
+
+# --- 任意（requirements-optional.txt 参照） ---
+# faster-whisper : 動画音声のローカル文字起こし
+# tesseract-ocr  : 画像・動画フレームのローカルOCR（OSパッケージ）
