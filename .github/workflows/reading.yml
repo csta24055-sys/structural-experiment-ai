@@ -78,7 +78,7 @@ jobs:
         run: |
           FLAGS=""
           if [ "${{ needs.plan.outputs.allow_ai }}" = "true" ]; then FLAGS="--allow-external-ai"; fi
-          python -m structlab -c "$STRUCTLAB_CONFIG" read --only "$TARGET" $FLAGS
+          python -m structlab -c "$STRUCTLAB_CONFIG" read --only "$TARGET" --out work/reading $FLAGS
       - name: Artifact name
         if: always()
         id: n

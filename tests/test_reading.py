@@ -263,6 +263,8 @@ def test_reading_workflow_is_readonly_and_ai_gated():
     assert on["push"]["paths"] == ["ops/requests/reading.txt"] and d["permissions"]["contents"] == "read"
     run = "\n".join(s.get("run", "") for s in d["jobs"]["read"]["steps"])
     assert 'if [ "${{ needs.plan.outputs.allow_ai }}" = "true" ]; then FLAGS="--allow-external-ai"' in run
+    # 設定ファイルの work_dir は configs/ からの相対パスになるため、成果物として保存する場所を明示する
+    assert "--out work/reading" in run
     up = next(s for s in d["jobs"]["read"]["steps"] if s.get("uses", "").startswith("actions/upload-artifact"))
     assert up["with"]["path"] == "work/reading" and up["with"]["retention-days"] <= 7
     assert "GH_SECRETS_TOKEN" not in text and "echo $DROPBOX" not in text
