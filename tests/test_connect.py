@@ -228,3 +228,39 @@ def test_analyze_workflow_ai_needs_explicit_request():
     assert on["workflow_dispatch"]["inputs"]["allow_external_ai"]["default"] is False
     run = d["jobs"]["analyze"]["steps"][-1]["run"]
     assert 'if [ "$AI" = "true" ]' in run and "allow_external_ai:" in run
+
+
+# ---------- OAuth 診断（通信なし） ----------
+class FakeHttp:
+    def __init__(self, *, client_ok=True, refresh_ok_with_secret=False, refresh_ok_pkce=False, authorize=200):
+        self.client_ok, self.rs, self.rp, self.authorize = client_ok, refresh_ok_with_secret, refresh_ok_pkce, authorize
+        self.posts = []
+
+    def post(self, url, data, timeout):
+        self.posts.append(dict(data))
+        if data["grant_type"] == "authorization_code":
+            j = {"error": "invalid_grant"} if self.client_ok else {"error": "invalid_client"}
+            return SimpleNamespace(status_code=400, json=lambda: j)
+        ok = self.rs if "client_secret" in data else self.rp
+        j = {"access_token": "sl.ACCESS-5555", "scope": "files.content.read files.metadata.read"} if ok else \
+            {"error": "invalid_grant", "error_description": "refresh token is malformed"}
+        return SimpleNamespace(status_code=200 if ok else 400, json=lambda: j)
+
+    def get(self, url, params, timeout, allow_redirects):
+        return SimpleNamespace(status_code=self.authorize, text="")
+
+
+def test_oauth_diagnosis_pinpoints_cause(monkeypatch):
+    from structlab.connect import diagnose_oauth
+    for k, v in SECRETS.items():
+        monkeypatch.setenv(k, v + "\n")  # 貼り付け時の改行
+    cred = dropbox_credentials()
+    assert cred["refresh_token"] == SECRETS["DROPBOX_REFRESH_TOKEN"] and "DROPBOX_APP_SECRET" in cred["padded"]
+    lines: list[str] = []
+    out = diagnose_oauth(cred, lines.append, http=FakeHttp(refresh_ok_pkce=True))
+    assert out == {"app_credentials": "ok", "authorize_url": "accepted", "refresh": "App secret なし（PKCE）"}
+    lines2: list[str] = []
+    out = diagnose_oauth(cred, lines2.append, http=FakeHttp(client_ok=False, authorize=400))
+    assert out["app_credentials"] == "invalid" and out["authorize_url"] == "rejected" and out["refresh"] == "failed"
+    text = "\n".join(lines + lines2)
+    assert not any(v in text for v in SECRETS.values()) and "sl.ACCESS-5555" not in text

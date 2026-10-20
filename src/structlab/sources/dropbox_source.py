@@ -34,10 +34,21 @@ def _from_file(env_name: str, default_name: str) -> str | None:
         return None
 
 
+def _env(name: str, padded: list[str]) -> str | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    v = raw.strip().strip('"').strip("'").strip()
+    if v and v != raw:
+        padded.append(name)  # 貼り付け時に入った空白・改行・引用符（自動で除去）
+    return v or None
+
+
 def dropbox_credentials() -> dict:
     """使える認証情報と、その出どころ（env / file）。値そのものは呼び出し側で表示しないこと。"""
-    app_key = os.environ.get("DROPBOX_APP_KEY") or None
-    refresh = os.environ.get("DROPBOX_REFRESH_TOKEN") or None
+    padded: list[str] = []
+    app_key = _env("DROPBOX_APP_KEY", padded)
+    refresh = _env("DROPBOX_REFRESH_TOKEN", padded)
     src = {"app_key": "env" if app_key else None, "refresh_token": "env" if refresh else None}
     if not refresh:
         refresh = _from_file("DROPBOX_REFRESH_TOKEN_FILE", "dropbox_refresh_token")
@@ -45,12 +56,12 @@ def dropbox_credentials() -> dict:
     if not app_key:
         app_key = _from_file("DROPBOX_APP_KEY_FILE", "dropbox_app_key")
         src["app_key"] = "file" if app_key else None
-    secret = os.environ.get("DROPBOX_APP_SECRET") or None
-    access = os.environ.get("DROPBOX_ACCESS_TOKEN") or None
+    secret = _env("DROPBOX_APP_SECRET", padded)
+    access = _env("DROPBOX_ACCESS_TOKEN", padded)
     src["app_secret"] = "env" if secret else None
     src["access_token"] = "env" if access else None
     return {"app_key": app_key, "refresh_token": refresh, "app_secret": secret, "access_token": access,
-            "sources": src, "usable": bool((app_key and refresh) or access)}
+            "sources": src, "usable": bool((app_key and refresh) or access), "padded": padded}
 
 
 def secret_values() -> list[str]:

@@ -55,7 +55,7 @@ def _dropbox_error_hint(e: Exception) -> str:
 
 def run_connect_check(cfg, *, download: bool = True, claude: bool = True, max_sample_mb: int = 1000,
                       out: Callable[[str], None] = print, client=None, ai_client=None,
-                      summary_path: str | None = None) -> dict:
+                      summary_path: str | None = None, http=None) -> dict:
     lines: list[str] = []
     res: dict = {"dropbox": {}, "samples": {}, "claude": {}, "ok": True}
 
@@ -79,6 +79,8 @@ def run_connect_check(cfg, *, download: bool = True, claude: bool = True, max_sa
                       ("DROPBOX_APP_SECRET", "app_secret"), ("DROPBOX_ACCESS_TOKEN", "access_token")):
         say(f"- {name}: " + ({"env": "あり（環境変数）", "file": "あり（権限600のファイル）"}.get(src[key]) or "なし"))
     say(f"- ANTHROPIC_API_KEY: {'あり' if os.environ.get('ANTHROPIC_API_KEY') else 'なし'}")
+    if cred["padded"]:
+        say("-- 前後に空白・改行・引用符が入っていた値（自動で除去して使用）: " + "、".join(cred["padded"]))
     res["credentials"] = {k: bool(v) for k, v in src.items()} | {"anthropic": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
     # ---- 2. Dropbox ----
@@ -86,6 +88,8 @@ def run_connect_check(cfg, *, download: bool = True, claude: bool = True, max_sa
     say("")
     say(f"## Dropbox（読み取りのみ。対象: {root}）")
     files: list[RemoteFile] | None = None
+    if client is None and cred["app_key"]:
+        res["oauth"] = diagnose_oauth(cred, say, http=http)
     if client is None and not cred["usable"]:
         fail("Dropbox の認証情報がありません（DROPBOX_APP_KEY と DROPBOX_REFRESH_TOKEN）。docs/SETUP_DROPBOX.md 参照")
     else:
@@ -150,6 +154,86 @@ def run_connect_check(cfg, *, download: bool = True, claude: bool = True, max_sa
         except OSError:
             pass
     return res
+
+
+TOKEN_URL = "https://api.dropboxapi.com/oauth2/token"
+AUTHORIZE_URL = "https://www.dropbox.com/oauth2/authorize"
+
+
+def diagnose_oauth(cred: dict, say, http=None) -> dict:
+    """OAuth 設定の診断（コードやトークンを新しく作らない・何も書き込まない）。
+    1) 存在しない認可コードで交換を試し、返るエラーで App key / App secret の正否を判定
+       （正しければ invalid_grant、違えば invalid_client）
+    2) 認可URL（読み取り2スコープ）が受け付けられるか
+    3) リフレッシュトークンの更新を、App secret あり（通常の取得）と なし（PKCE で取得）の両方で試す
+    """
+    import requests
+    http = http or requests
+    out: dict = {}
+    say("### OAuth 設定の診断（値は表示しません）")
+
+    def post(data):
+        r = http.post(TOKEN_URL, data=data, timeout=30)
+        try:
+            j = r.json()
+        except ValueError:
+            j = {}
+        return r.status_code, j
+
+    def desc(j):
+        e = j.get("error")
+        tag = e.get(".tag") if isinstance(e, dict) else e
+        return f"{tag or '?'}" + (f"（{redact(str(j.get('error_description')))[:120]}）" if j.get("error_description") else "")
+
+    key, secret, token = cred["app_key"], cred["app_secret"], cred["refresh_token"]
+    try:
+        if secret:
+            st, j = post({"grant_type": "authorization_code", "code": "structlab-diagnostic-invalid-code",
+                          "client_id": key, "client_secret": secret})
+            tag = desc(j)
+            if tag.startswith("invalid_grant"):
+                say("[OK ] App key と App secret の組み合わせは正しい（存在しないコードを渡して invalid_grant が返ることで確認）")
+                out["app_credentials"] = "ok"
+            else:
+                say(f"[NG ] App key / App secret が受け付けられません: HTTP {st} {tag}")
+                say("      → Secrets の DROPBOX_APP_KEY・DROPBOX_APP_SECRET が同じアプリのものか、前後に空白・改行が入っていないか確認")
+                out["app_credentials"] = "invalid"
+        else:
+            say("-- DROPBOX_APP_SECRET なし: App key と secret の組み合わせは確認できません")
+            out["app_credentials"] = "no_secret"
+        r = http.get(AUTHORIZE_URL, params={"client_id": key, "response_type": "code", "token_access_type": "offline",
+                                            "scope": "files.metadata.read files.content.read"},
+                     timeout=30, allow_redirects=False)
+        body = (getattr(r, "text", "") or "")[:20000].lower()
+        bad = r.status_code >= 400 or "invalid_client" in body or "invalid client_id" in body or "invalid_scope" in body
+        out["authorize_url"] = "rejected" if bad else "accepted"
+        say(f"[{'NG ' if bad else 'OK '}] 認可URL（読み取り2スコープ）: HTTP {r.status_code}"
+            + ("。App key が違うか、Permissions でチェックしていないスコープを求めています" if bad else "（Dropbox が受け付けた）"))
+        if token:
+            tries = ([("App secret あり", True)] if secret else []) + [("App secret なし（PKCE）", False)]
+            for label, use_secret in tries:
+                data = {"grant_type": "refresh_token", "refresh_token": token, "client_id": key}
+                if use_secret:
+                    data["client_secret"] = secret
+                st, j = post(data)
+                if st == 200 and j.get("access_token"):
+                    scope = j.get("scope")
+                    say(f"[OK ] リフレッシュトークンで更新できた（{label}）" + (f"。許可された権限: {scope}" if scope else ""))
+                    out["refresh"] = label
+                    if scope and "files.content.write" in scope:
+                        say("-- 書き込み権限（files.content.write）も含まれています。読み取り専用で始めるなら取り直しを推奨")
+                    break
+                say(f"[NG ] リフレッシュトークンで更新できない（{label}）: HTTP {st} {desc(j)}")
+            else:
+                out["refresh"] = "failed"
+                say("      → トークンが取り消し済み・別アプリのもの・コピー時の欠けや余分な空白の可能性。取り直しが必要です")
+        else:
+            say("-- DROPBOX_REFRESH_TOKEN なし: トークンの更新は確認できません")
+            out["refresh"] = "missing"
+    except Exception as e:  # noqa: BLE001
+        say("[NG ] OAuth の診断中に通信エラー: " + _err(e))
+        out["error"] = _err(e)
+    return out
 
 
 class _Stop(Exception):
