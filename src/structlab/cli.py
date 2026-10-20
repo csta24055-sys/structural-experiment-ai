@@ -14,6 +14,7 @@
   show-directive 指示1件の根拠・前後の文脈・関連・照合結果を表示
   dropbox-auth Dropbox のリフレッシュトークン取得（PKCE・読み取り専用。値は表示しない）
   connect-check Dropbox・Claude API の接続確認（読み取りのみ・課金なし）
+  read         資料の読み取り基盤（棚卸し・場面分割・OCR・文字起こし・AIの書き起こし・照合）
 """
 from __future__ import annotations
 
@@ -576,6 +577,32 @@ def cmd_dropbox_auth(args) -> int:
     return 0 if run_connect_check(cfg, download=False, claude=False)["ok"] else 1
 
 
+def cmd_read(args) -> int:
+    """資料の読み取り（棚卸し・ローカル読み取り・AIの書き起こし（許可時）・照合）。元資料は読むだけ。"""
+    cfg = load_config(args.config)
+    if args.list_targets:  # GitHub Actions で資料ごとに並列実行するための一覧（JSON）
+        from .reading.runner import list_targets
+        from .sources import make_source
+        print(json.dumps(list_targets(cfg, make_source(cfg)), ensure_ascii=False))
+        return 0
+    _setup_logging(cfg, args.verbose)
+    from .reading.runner import run_reading
+    provider = None
+    if args.allow_external_ai:
+        from .ai import make_provider
+        provider, why = make_provider(cfg, allow_external_flag=True)
+        if provider is None:
+            print(f"AI を使えません: {why}")
+            return 1
+    if args.max_ai_calls is not None:
+        cfg.data.setdefault("reading", {})["max_ai_calls"] = args.max_ai_calls
+    summary = run_reading(cfg, only=args.only, allow_ai=args.allow_external_ai, provider=provider,
+                          out_dir=Path(args.out) if args.out else None, log=lambda m: print(m, flush=True))
+    out = Path(args.out) if args.out else cfg.work_dir / "reading"
+    print((out / "summary.md").read_text(encoding="utf-8"))
+    return 0 if not any(f.get("error") for f in summary["files"]) else 1
+
+
 def cmd_connect_check(args) -> int:
     cfg = load_config(args.config)
     from .connect import run_connect_check
@@ -646,6 +673,12 @@ def main(argv: list[str] | None = None) -> int:
                         "（DROPBOX_AUTH_CODE を交換し DROPBOX_REFRESH_TOKEN に登録）")
     p.add_argument("code", nargs="?")
     p.add_argument("--write", action="store_true", help="解析結果の保存用に files.content.write も許可する")
+    p = sub.add_parser("read", help="資料の読み取り基盤（棚卸し・場面分割・OCR・文字起こし・AIの書き起こし・照合）")
+    p.add_argument("--only", nargs="*", help="パスの一部で対象を絞る")
+    p.add_argument("--allow-external-ai", action="store_true", help="AIによる画像の書き起こし（有料。事前に見積もりを確認）")
+    p.add_argument("--max-ai-calls", type=int, default=None)
+    p.add_argument("--out", help="出力先（既定: work/reading）")
+    p.add_argument("--list-targets", action="store_true", help="読み取る資料（重複を除く）の一覧を JSON で出す")
     p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")
     p.add_argument("--no-download", action="store_true", help="動画・PDF・Excel の見本の取得を省略")
     p.add_argument("--no-claude", action="store_true")
@@ -658,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
                 "style": cmd_style, "feedback": cmd_feedback, "trace": cmd_trace,
                 "checks": cmd_checks, "reverify": cmd_reverify, "check-draft": cmd_check_draft,
                 "estimate": cmd_estimate, "search": cmd_search, "show-directive": cmd_show_directive,
-                "dropbox-auth": cmd_dropbox_auth, "connect-check": cmd_connect_check}[args.cmd](args)
+                "dropbox-auth": cmd_dropbox_auth, "connect-check": cmd_connect_check, "read": cmd_read}[args.cmd](args)
     except ConfigError as e:
         print(f"設定エラー: {e}", file=sys.stderr)
         return 2

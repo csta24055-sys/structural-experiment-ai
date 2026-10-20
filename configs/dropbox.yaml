@@ -28,8 +28,11 @@ video:
 
 transcription:
   backend: faster_whisper
-  model: small
+  # 実際の講義動画で比較（6分間）: small は専門用語の誤り 29 回、large-v3-turbo は 6 回（梁→「針」、加力→「火力」などが減る）
+  model: large-v3-turbo
   language: ja
+  # 専門用語の手がかり（structlab read では PDF の用語も自動で加える）
+  initial_prompt: "建築構造実験。鉄筋コンクリート（RC）梁のせん断加力実験。梁、柱、柱梁接合部、耐震壁、構造部材実験、構造力学、ガイダンス、PDF、支点、載荷点、変位、変位計、油圧ジャッキ、ロードセル、曲げモーメント、主筋、あばら筋、ひび割れ"
 
 ocr:
   backend: auto

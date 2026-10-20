@@ -56,6 +56,8 @@ DEFAULTS: dict[str, Any] = {
     "transcription": {
         "backend": "none", "model": "small", "language": "ja",
         "device": "cpu", "compute_type": "int8",
+        # 専門用語の手がかり（誤認識しやすい語）。資料読み取り（structlab read）では PDF の用語も自動で加える
+        "initial_prompt": "", "beam_size": 5,
     },
     "ocr": {"backend": "auto", "languages": "jpn+eng"},
     "ai": {
@@ -96,6 +98,12 @@ DEFAULTS: dict[str, Any] = {
         # 動画の音声の発言者。話者識別はしないので既定は unknown（先生の指示と断定しない）。
         # 利用者が「動画の音声はすべて先生」と確認した場合のみ teacher にする
         "video_speaker": "unknown",
+    },
+    # 資料読み取り基盤（structlab read）。docs/READING.md 参照
+    "reading": {
+        "scene_interval_seconds": 1.0,   # 画面の変化を調べる間隔
+        "max_events_per_scene": 4,       # 場面内の変化（操作・書き込み）の画面を保存する上限
+        "max_ai_calls": 0,               # 1回の実行での AI 読み取りの上限（0 = 上限なし）
     },
     "checks": {
         # 各工程のチェック（AI不使用）。既存の検証に足りない部分だけを行う
