@@ -54,3 +54,13 @@ Dropbox に state.db を保存している場合は、出力フォルダの `sta
 - `knowledge.md` の各項目には出典（ファイル・ページ・時刻）があります。必ず原資料で確認してください
 - 「AIの推測」「根拠が原文で確認できない」項目は誤りの可能性があります
 - 動画の発話と画面の対応がずれる場合は、`video.sample_interval_seconds` を小さく、`video.scene_change_threshold` を調整してください
+
+## Dropbox・Claude API の接続確認（connect-check / Connection check）で NG
+| 表示 | 対処 |
+|---|---|
+| リフレッシュトークンが無効 | App key / App secret と同じアプリで取り直す（SETUP_DROPBOX.md A-2〜A-4）。コピーの欠けにも注意 |
+| 権限（スコープ）が足りません | App Console の Permissions を確認 → Submit → もう一度許可してトークンを取り直す |
+| App key または App secret が違います | Secrets の `DROPBOX_APP_KEY`・`DROPBOX_APP_SECRET` を登録し直す |
+| フォルダが見つかりません・何も見えない | アプリの Access type が App folder の可能性。Full Dropbox のアプリを使う。似た名前が表示されたら `source.path` を合わせる |
+| ANTHROPIC_API_KEY がありません | Secrets に `ANTHROPIC_API_KEY`（または CLAUDE_API_KEY）で登録 |
+| キーが無効です | Claude Console でキーを作り直して Secrets を更新 |

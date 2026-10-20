@@ -12,7 +12,8 @@
   estimate     AI解析（有料）を始める前の呼び出し回数・費用の概算（APIは呼ばない）
   search       指示・場面の理解をキーワード検索
   show-directive 指示1件の根拠・前後の文脈・関連・照合結果を表示
-  dropbox-auth Dropbox のリフレッシュトークン取得（PKCE）
+  dropbox-auth Dropbox のリフレッシュトークン取得（PKCE・読み取り専用。値は表示しない）
+  connect-check Dropbox・Claude API の接続確認（読み取りのみ・課金なし）
 """
 from __future__ import annotations
 
@@ -175,9 +176,9 @@ def cmd_check(args) -> int:
     except OSError as e:
         line(False, f"ディスク確認失敗: {e}")
     if cfg.data["source"]["type"] == "dropbox":
-        has = (os.environ.get("DROPBOX_APP_KEY") and os.environ.get("DROPBOX_REFRESH_TOKEN")) or \
-            os.environ.get("DROPBOX_ACCESS_TOKEN")
-        line(bool(has), "Dropbox 認証情報（環境変数。値は表示しません）")
+        from .sources.dropbox_source import dropbox_credentials
+        has = dropbox_credentials()["usable"]
+        line(bool(has), "Dropbox 認証情報（環境変数またはトークンファイル。値は表示しません）")
         if has:
             try:
                 from .sources.dropbox_source import DropboxSource
@@ -189,7 +190,8 @@ def cmd_check(args) -> int:
                         break
                 line(True, f"Dropbox 接続・フォルダ '{cfg.data['source']['path']}' の読み取り（先頭{n}件を確認）")
             except Exception as e:  # noqa: BLE001
-                line(False, f"Dropbox 接続失敗: {e}")
+                from .sources.dropbox_source import redact
+                line(False, redact(f"Dropbox 接続失敗: {e}"))
     else:
         line(Path(cfg.data["source"]["path"]).is_dir(), f"ローカルフォルダ {cfg.data['source']['path']}")
     print("\n結果: " + ("実行可能です" if ok else "NG の項目を解消してください（docs/TROUBLESHOOTING.md）"))
@@ -519,35 +521,65 @@ def cmd_trace(args) -> int:
 
 
 def cmd_dropbox_auth(args) -> int:
+    """PKCE でリフレッシュトークンを取得し、権限600のファイルに保存する（値は表示しない）。
+    スコープは読み取り専用（--write を付けたときだけ、解析結果の保存用に files.content.write を追加）。"""
     from dropbox import DropboxOAuth2FlowNoRedirect
-    app_key = os.environ.get("DROPBOX_APP_KEY")
-    if not app_key:
-        print("環境変数 DROPBOX_APP_KEY を設定してから実行してください")
-        return 1
-    state = Path(os.path.expanduser("~/.config/structlab/pkce.json"))
-    flow = DropboxOAuth2FlowNoRedirect(app_key, use_pkce=True, token_access_type="offline")
+    from .sources.dropbox_source import CRED_DIR, READ_SCOPES, dropbox_credentials
+    cdir = CRED_DIR.expanduser()
+    state = cdir / "pkce.json"
     if args.step == "start":
+        app_key = dropbox_credentials()["app_key"]
+        if not app_key:
+            print("環境変数 DROPBOX_APP_KEY を設定してから実行してください（値はチャットに貼らないでください）")
+            return 1
+        scopes = READ_SCOPES + (["files.content.write"] if args.write else [])
+        flow = DropboxOAuth2FlowNoRedirect(app_key, use_pkce=True, token_access_type="offline", scope=scopes)
         url = flow.start()
-        state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps({"code_verifier": flow.code_verifier, "code_challenge": flow.code_challenge}))
-        os.chmod(state, 0o600)
-        print("1) 次のURLをブラウザで開き、Dropbox で「許可」を押してください:\n" + url)
-        print("2) 表示されたコードで: structlab dropbox-auth finish <コード>")
+        cdir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(state, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"code_verifier": flow.code_verifier, "code_challenge": flow.code_challenge,
+                       "app_key": app_key, "scopes": scopes}, f)
+        print("1) 次のURLをブラウザで開き、Dropbox で「許可」を押してください（権限: " + ", ".join(scopes) + "）:\n" + url)
+        print("2) 表示されたコードで: structlab dropbox-auth finish <コード>（コードは一度きり・数分で失効）")
         return 0
     if not state.exists() or not args.code:
         print("先に `structlab dropbox-auth start` を実行してください")
         return 1
     saved = json.loads(state.read_text())
+    flow = DropboxOAuth2FlowNoRedirect(saved["app_key"], use_pkce=True, token_access_type="offline",
+                                       scope=saved.get("scopes"))
     flow.code_verifier, flow.code_challenge = saved["code_verifier"], saved["code_challenge"]
-    res = flow.finish(args.code.strip())
-    state.unlink(missing_ok=True)
-    out = Path(os.path.expanduser("~/.config/structlab/dropbox_refresh_token"))
-    out.write_text(res.refresh_token)
-    os.chmod(out, 0o600)
-    print(f"リフレッシュトークンを {out} に保存しました（権限600）。")
-    print("この値を実行環境の環境変数 DROPBOX_REFRESH_TOKEN に設定してください。GitHub やチャットには貼らないでください。")
-    print("表示する場合: cat " + str(out))
-    return 0
+    try:
+        res = flow.finish(args.code.strip())
+    except Exception as e:  # noqa: BLE001
+        print(f"トークンの取得に失敗しました（{type(e).__name__}）。コードの期限切れの場合は start からやり直してください")
+        return 1
+    finally:
+        state.unlink(missing_ok=True)
+    for name, val in (("dropbox_refresh_token", res.refresh_token), ("dropbox_app_key", saved["app_key"])):
+        fd = os.open(cdir / name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(val)
+        os.chmod(cdir / name, 0o600)
+    print(f"リフレッシュトークンを {cdir / 'dropbox_refresh_token'} に保存しました（権限600。値は表示しません）。")
+    print("この実行環境では環境変数なしで使えます。GitHub Actions で使うには docs/SETUP_DROPBOX.md の手順で Secrets に登録してください。")
+    print("続けて接続を確認します（読み取りのみ）:")
+    try:
+        cfg = load_config(args.config)
+    except ConfigError:
+        cfg = load_config(Path(__file__).resolve().parents[2] / "configs" / "dropbox.yaml")
+    from .connect import run_connect_check
+    return 0 if run_connect_check(cfg, download=False, claude=False)["ok"] else 1
+
+
+def cmd_connect_check(args) -> int:
+    cfg = load_config(args.config)
+    from .connect import run_connect_check
+    res = run_connect_check(cfg, download=not args.no_download, claude=not args.no_claude,
+                            max_sample_mb=args.max_sample_mb,
+                            summary_path=args.summary or os.environ.get("GITHUB_STEP_SUMMARY"))
+    return 0 if res["ok"] else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -605,9 +637,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--note")
     p = sub.add_parser("trace", help="結果がどの工程を経て作られたかを表示（例: directive:37）")
     p.add_argument("target")
-    p = sub.add_parser("dropbox-auth")
+    p = sub.add_parser("dropbox-auth", help="Dropbox のリフレッシュトークン取得（PKCE。値は表示しない）")
     p.add_argument("step", choices=["start", "finish"])
     p.add_argument("code", nargs="?")
+    p.add_argument("--write", action="store_true", help="解析結果の保存用に files.content.write も許可する")
+    p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")
+    p.add_argument("--no-download", action="store_true", help="動画・PDF・Excel の見本の取得を省略")
+    p.add_argument("--no-claude", action="store_true")
+    p.add_argument("--max-sample-mb", type=int, default=1000)
+    p.add_argument("--summary", help="結果の Markdown を追記するファイル（既定: GITHUB_STEP_SUMMARY）")
     args = ap.parse_args(argv)
     try:
         return {"init": cmd_init, "check": cmd_check, "scan": cmd_scan, "run": cmd_run, "status": cmd_status,
@@ -615,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
                 "style": cmd_style, "feedback": cmd_feedback, "trace": cmd_trace,
                 "checks": cmd_checks, "reverify": cmd_reverify, "check-draft": cmd_check_draft,
                 "estimate": cmd_estimate, "search": cmd_search, "show-directive": cmd_show_directive,
-                "dropbox-auth": cmd_dropbox_auth}[args.cmd](args)
+                "dropbox-auth": cmd_dropbox_auth, "connect-check": cmd_connect_check}[args.cmd](args)
     except ConfigError as e:
         print(f"設定エラー: {e}", file=sys.stderr)
         return 2

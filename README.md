@@ -73,6 +73,7 @@ sudo apt-get install ffmpeg tesseract-ocr tesseract-ocr-jpn
 ```bash
 structlab init                 # config.example.yaml を config.yaml にコピー
 structlab check                # 環境・認証・接続を確認（何も書き換えない）
+structlab connect-check        # Dropbox の一覧・動画/PDF/Excel の取得・Claude キーの確認（読み取りのみ・課金なし）
 structlab scan                 # 一覧取得と新規・更新・削除・アップロード待ちの判定だけ
 structlab run                  # スキャン → 解析 → 結果出力
 structlab run --allow-external-ai --max-runtime 300   # AI解析あり・300分で安全に停止

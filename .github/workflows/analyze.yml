@@ -1,4 +1,8 @@
-# Dropbox の資料を解析する（手動実行）。GitHub アプリの Actions タブから Run workflow で起動できます。
+# Dropbox の資料を解析する（手動実行）。
+#   - 既定ブランチに取り込んだ後は、GitHub の Actions タブ → Analyze materials → Run workflow
+#   - ops/requests/analyze.txt を変更して push（Claude Code が代わりに行えます）。
+#     有料のAI解析は、そのファイルに allow_external_ai: true と書いたときだけ（利用者の承認後に限る）
+# 解析結果を出力フォルダへ保存するため、Dropbox に files.content.write の許可が必要（docs/SETUP_DROPBOX.md 手順B）。
 # 結果と処理状況は Dropbox の出力フォルダにのみ保存し、GitHub（Artifacts を含む）には保存しません。
 name: Analyze materials
 
@@ -13,6 +17,9 @@ on:
         description: "この時間（分）で安全に停止し、次回続きから"
         type: number
         default: 330
+  push:
+    paths:
+      - "ops/requests/analyze.txt"
 
 permissions:
   contents: read
@@ -29,7 +36,7 @@ jobs:
       DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CLAUDE_API_KEY || secrets.ANTHROPIC_KEY || secrets.CLAUDE_KEY }}
       STRUCTLAB_CONFIG: configs/dropbox.yaml
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +58,12 @@ jobs:
           python -m pip install -e . faster-whisper
       - name: Analyze
         run: |
-          FLAGS="--max-runtime ${{ inputs.max_runtime_minutes }}"
-          if [ "${{ inputs.allow_external_ai }}" = "true" ]; then FLAGS="$FLAGS --allow-external-ai"; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MINUTES="${{ inputs.max_runtime_minutes }}"; AI="${{ inputs.allow_external_ai }}"
+          else
+            MINUTES=$(sed -n 's/^max_runtime_minutes:[[:space:]]*\([0-9][0-9]*\).*/\1/p' ops/requests/analyze.txt | head -1)
+            AI=$(sed -n 's/^allow_external_ai:[[:space:]]*\(true\|false\).*/\1/p' ops/requests/analyze.txt | head -1)
+          fi
+          FLAGS="--max-runtime ${MINUTES:-330}"
+          if [ "$AI" = "true" ]; then FLAGS="$FLAGS --allow-external-ai"; fi
           scripts/run_analysis.sh $FLAGS

@@ -10,7 +10,12 @@
 2. 終わったら `python3 -m structlab -c configs/dropbox.yaml status` の要点（完了数・失敗・アップロード待ち・AI使用量）を短く報告する
 3. 結果は Dropbox の `/鋼材実験レポート用_解析結果/results/` にあると伝える（指示一覧は `semantic/directives.md`、
    網羅率は `semantic/coverage.md`。網羅率は「処理した時間の割合」であり「指示を漏れなく理解できた割合」ではないことも伝える）
-- 認証情報（DROPBOX_APP_KEY, DROPBOX_REFRESH_TOKEN, ANTHROPIC_API_KEY）が無い場合は、チャットに貼らせず、クラウド環境の設定に環境変数として登録してもらう（docs/SETUP_DROPBOX.md）
+- 認証情報（DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, ANTHROPIC_API_KEY）が無い場合は、チャットに貼らせず、
+  GitHub Secrets またはクラウド環境の環境変数に登録してもらう（docs/SETUP_DROPBOX.md 手順A。iPhone では1手順ずつ案内する）
+- このセッションに認証情報が無くても、GitHub Actions 側で実行できる: `ops/requests/connection-check.txt`（接続確認・読み取りのみ）や
+  `ops/requests/analyze.txt`（解析）を変更して push し、ワークフローのログを GitHub のツールで読んで報告する。
+  analyze.txt の `allow_external_ai: true` は有料なので、見積もりを伝えて承認を得てからにする
+- トークンやキーの値を表示・保存・コミットしない（`cat` で中身を見ない。接続確認の出力は伏せ字になる）
 - 途中で止まっても同じコマンドで続きから再開できる
 
 ## チェック・再検証・文章スタイル・フィードバック

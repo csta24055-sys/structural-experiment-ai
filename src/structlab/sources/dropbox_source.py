@@ -1,8 +1,10 @@
 """Dropbox API ソース（読み取り専用）と、結果保存用の書き込み先（出力フォルダ限定）。
 
-認証情報は環境変数からのみ読む:
-  DROPBOX_APP_KEY + DROPBOX_REFRESH_TOKEN (+ 任意 DROPBOX_APP_SECRET)  … 推奨（自動更新）
-  DROPBOX_ACCESS_TOKEN                                               … 短期トークン（4時間程度で失効）
+認証情報は環境変数（GitHub Actions では Secrets から渡す）か、権限600のファイルからだけ読む。値は表示しない:
+  DROPBOX_APP_KEY + DROPBOX_REFRESH_TOKEN (+ DROPBOX_APP_SECRET)  … 推奨（自動更新。PKCE で取得した場合は secret 不要）
+  DROPBOX_ACCESS_TOKEN                                           … 短期トークン（4時間程度で失効）
+  ~/.config/structlab/dropbox_refresh_token, dropbox_app_key      … `structlab dropbox-auth` が保存するファイル
+    （場所は DROPBOX_REFRESH_TOKEN_FILE / DROPBOX_APP_KEY_FILE で変更可。環境変数の方が優先）
 """
 from __future__ import annotations
 
@@ -17,24 +19,68 @@ from .base import Source, SourceChanged, SourceError
 
 T = TypeVar("T")
 
+CRED_DIR = Path("~/.config/structlab")
+#: 読み取り専用で始めるためのスコープ（解析結果を出力フォルダへ保存するには files.content.write を後で追加する）
+READ_SCOPES = ["files.metadata.read", "files.content.read"]
+SECRET_ENV_NAMES = ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "DROPBOX_ACCESS_TOKEN",
+                    "ANTHROPIC_API_KEY")
+
+
+def _from_file(env_name: str, default_name: str) -> str | None:
+    p = Path(os.environ.get(env_name) or (CRED_DIR / default_name)).expanduser()
+    try:
+        return p.read_text(encoding="utf-8").strip() or None if p.is_file() else None
+    except OSError:
+        return None
+
+
+def dropbox_credentials() -> dict:
+    """使える認証情報と、その出どころ（env / file）。値そのものは呼び出し側で表示しないこと。"""
+    app_key = os.environ.get("DROPBOX_APP_KEY") or None
+    refresh = os.environ.get("DROPBOX_REFRESH_TOKEN") or None
+    src = {"app_key": "env" if app_key else None, "refresh_token": "env" if refresh else None}
+    if not refresh:
+        refresh = _from_file("DROPBOX_REFRESH_TOKEN_FILE", "dropbox_refresh_token")
+        src["refresh_token"] = "file" if refresh else None
+    if not app_key:
+        app_key = _from_file("DROPBOX_APP_KEY_FILE", "dropbox_app_key")
+        src["app_key"] = "file" if app_key else None
+    secret = os.environ.get("DROPBOX_APP_SECRET") or None
+    access = os.environ.get("DROPBOX_ACCESS_TOKEN") or None
+    src["app_secret"] = "env" if secret else None
+    src["access_token"] = "env" if access else None
+    return {"app_key": app_key, "refresh_token": refresh, "app_secret": secret, "access_token": access,
+            "sources": src, "usable": bool((app_key and refresh) or access)}
+
+
+def secret_values() -> list[str]:
+    """ログ・画面に出してはいけない値（伏せ字にするため）。"""
+    vals = [os.environ.get(n) for n in SECRET_ENV_NAMES]
+    c = dropbox_credentials()
+    vals += [c["refresh_token"], c["app_key"]]
+    return sorted({v for v in vals if v and len(v) >= 6}, key=len, reverse=True)
+
+
+def redact(text: str) -> str:
+    for v in secret_values():
+        text = text.replace(v, "***")
+    return text
+
 
 def make_client():
     try:
         import dropbox
     except ImportError as e:  # pragma: no cover
         raise SourceError("dropbox ライブラリがありません: pip install dropbox") from e
-    app_key = os.environ.get("DROPBOX_APP_KEY")
-    refresh = os.environ.get("DROPBOX_REFRESH_TOKEN")
-    secret = os.environ.get("DROPBOX_APP_SECRET") or None
-    access = os.environ.get("DROPBOX_ACCESS_TOKEN")
-    if app_key and refresh:
-        return dropbox.Dropbox(oauth2_refresh_token=refresh, app_key=app_key, app_secret=secret,
-                               timeout=300)
-    if access:
-        return dropbox.Dropbox(oauth2_access_token=access, timeout=300)
+    c = dropbox_credentials()
+    if c["app_key"] and c["refresh_token"]:
+        return dropbox.Dropbox(oauth2_refresh_token=c["refresh_token"], app_key=c["app_key"],
+                               app_secret=c["app_secret"], timeout=300)
+    if c["access_token"]:
+        return dropbox.Dropbox(oauth2_access_token=c["access_token"], timeout=300)
     raise SourceError(
         "Dropbox の認証情報がありません。環境変数 DROPBOX_APP_KEY と DROPBOX_REFRESH_TOKEN を設定してください"
-        "（docs/SETUP_DROPBOX.md 参照）"
+        "（GitHub Actions では Secrets。docs/SETUP_DROPBOX.md 参照）"
     )
 
 
