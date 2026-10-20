@@ -1,3 +1,3 @@
 # このファイルを変更して push すると、GitHub Actions の「Connection check」が動きます（読み取りのみ・課金なし）。
 # 下の行は実行のきっかけにするための記録です。
-request: 2026-10-20 oauth-diagnosis (app key + secret registered)
+request: 2026-10-20 verify stored DROPBOX_REFRESH_TOKEN
