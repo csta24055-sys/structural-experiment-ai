@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -266,45 +267,121 @@ def test_oauth_diagnosis_pinpoints_cause(monkeypatch):
     assert not any(v in text for v in SECRETS.values()) and "sl.ACCESS-5555" not in text
 
 
-# ---------- 認可コードの交換（GitHub Actions 用・通信なし） ----------
-def test_exchange_code_saves_privately_and_masks(tmp_path, monkeypatch, capsys):
-    from structlab import token_store as ts
-    monkeypatch.setenv("DROPBOX_APP_KEY", SECRETS["DROPBOX_APP_KEY"])
-    monkeypatch.setenv("DROPBOX_APP_SECRET", SECRETS["DROPBOX_APP_SECRET"])
-    monkeypatch.setenv("DROPBOX_AUTH_CODE", " code-XYZ \n")
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    sent = []
+# ---------- 認可コードの交換と GitHub Secrets への登録（通信なし） ----------
+class FakeGitHub:
+    """Dropbox のトークン交換と GitHub Secrets API の模擬。登録された値は公開鍵の秘密鍵側で復号して確かめる。"""
 
-    class Http:
-        def post(self, url, data, timeout):
-            sent.append(data)
-            j = {"refresh_token": "refresh-NEW-7777", "access_token": "sl.A-8888", "scope": "files.content.read"}
+    def __init__(self, *, code_ok=True, gh_status=None):
+        from nacl.public import PrivateKey
+        self.sk = PrivateKey.generate()
+        self.code_ok, self.gh_status = code_ok, gh_status
+        self.secrets: dict[str, bytes] = {"DROPBOX_AUTH_CODE": b"(set)"}
+        self.calls = []
+
+    def request(self, method, url, *, data=None, json_body=None, headers=None):
+        import base64 as b64
+        from nacl.encoding import Base64Encoder
+        from nacl.public import SealedBox
+        self.calls.append((method, url))
+        if url.startswith("https://api.dropboxapi.com"):
+            j = {"refresh_token": "refresh-NEW-7777", "access_token": "sl.A-8888",
+                 "scope": "files.content.read files.metadata.read"} if self.code_ok else {"error": "invalid_grant"}
+            return SimpleNamespace(status_code=200 if self.code_ok else 400, json=lambda: j)
+        assert headers["Authorization"] == "Bearer pat-WRITER-6666"
+        assert "/repos/owner/repo/actions/secrets" in url
+        if self.gh_status:
+            return SimpleNamespace(status_code=self.gh_status, json=lambda: {})
+        name = url.rsplit("/", 1)[-1]
+        if name == "public-key":
+            j = {"key_id": "kid1", "key": self.sk.public_key.encode(Base64Encoder).decode()}
             return SimpleNamespace(status_code=200, json=lambda: j)
+        if method == "PUT":
+            assert json_body["key_id"] == "kid1" and "refresh-NEW" not in json.dumps(json_body)
+            new = name not in self.secrets
+            self.secrets[name] = SealedBox(self.sk).decrypt(b64.b64decode(json_body["encrypted_value"]))
+            return SimpleNamespace(status_code=201 if new else 204, json=lambda: {})
+        if method == "DELETE":
+            return SimpleNamespace(status_code=204 if self.secrets.pop(name, None) else 404, json=lambda: {})
+        return SimpleNamespace(status_code=200 if name in self.secrets else 404, json=lambda: {})
 
-    assert ts.cmd_exchange(http=Http())["scope"] == "files.content.read"
-    assert sent[0]["code"] == "code-XYZ" and sent[0]["grant_type"] == "authorization_code"
+
+@pytest.fixture
+def actions_env(monkeypatch):
+    pytest.importorskip("nacl")
+    monkeypatch.setenv("DROPBOX_APP_KEY", SECRETS["DROPBOX_APP_KEY"])
+    monkeypatch.setenv("DROPBOX_APP_SECRET", SECRETS["DROPBOX_APP_SECRET"] + "\n")
+    monkeypatch.setenv("GH_SECRETS_TOKEN", "pat-WRITER-6666")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+
+def test_exchange_then_store_in_github_secrets(tmp_path, monkeypatch, capsys, actions_env):
+    from structlab import token_store as ts
+    monkeypatch.setenv("DROPBOX_REFRESH_TOKEN_FILE", str(tmp_path / "creds" / "dropbox_refresh_token"))
+    monkeypatch.setenv("DROPBOX_AUTH_CODE", " code-XYZ \n")
+    gh = FakeGitHub()
+    ts.cmd_exchange(http=gh)
     tok = tmp_path / "creds" / "dropbox_refresh_token"
     assert tok.read_text() == "refresh-NEW-7777" and oct(tok.stat().st_mode & 0o777) == "0o600"
+    assert dropbox_credentials()["refresh_token"] == "refresh-NEW-7777"  # 同じ実行の接続確認でそのまま使える
+    assert ts.cmd_store(http=gh) == "created"
+    assert gh.secrets["DROPBOX_REFRESH_TOKEN"] == b"refresh-NEW-7777"  # 公開鍵で暗号化して登録された
+    assert "DROPBOX_AUTH_CODE" not in gh.secrets  # 使い終わったコードは削除
     out = capsys.readouterr().out
-    # 出力されるのは GitHub に伏せ字を指示する行だけ
-    assert all(ln.startswith("::add-mask::") for ln in out.splitlines() if "7777" in ln or "8888" in ln)
-    assert dropbox_credentials()["refresh_token"] == "refresh-NEW-7777"
+    leaked = [ln for ln in out.splitlines() if any(v in ln for v in ("7777", "8888", "6666", "BBBB2222"))]
+    assert all(ln.startswith("::add-mask::") for ln in leaked)  # GitHub に伏せ字を指示する行だけ
 
-    class Bad:
-        def post(self, url, data, timeout):
-            return SimpleNamespace(status_code=400, json=lambda: {"error": "invalid_grant"})
 
+def test_exchange_expired_code_and_bad_pat(tmp_path, monkeypatch, actions_env):
+    from structlab import token_store as ts
+    monkeypatch.setenv("DROPBOX_REFRESH_TOKEN_FILE", str(tmp_path / "t"))
+    monkeypatch.setenv("DROPBOX_AUTH_CODE", "old-code")
     with pytest.raises(ts.TokenError, match="期限切れ"):
-        ts.cmd_exchange(http=Bad())
+        ts.cmd_exchange(http=FakeGitHub(code_ok=False))
+    assert not (tmp_path / "t").exists()
+    with pytest.raises(ts.TokenError, match="交換済みのトークンがありません"):
+        ts.cmd_store(http=FakeGitHub())
+    lines: list[str] = []
+    assert ts.cmd_preflight(http=FakeGitHub(gh_status=403), out=lines.append) is False
+    assert any("Secrets の読み書き権限" in ln for ln in lines)
 
 
-def test_dropbox_auth_workflow_exchanges_before_slow_setup():
+def test_preflight_writes_and_removes_test_secret(actions_env):
+    from structlab import token_store as ts
+    gh = FakeGitHub()
+    lines: list[str] = []
+    assert ts.cmd_preflight(http=gh, out=lines.append), lines
+    assert ts.TEST_SECRET not in gh.secrets and ("PUT", f"https://api.github.com/repos/owner/repo/actions/secrets/{ts.TEST_SECRET}") in gh.calls
+    assert not any(c[0] == "PUT" and c[1].endswith("DROPBOX_REFRESH_TOKEN") for c in gh.calls)
+    assert not any("pat-WRITER" in ln for ln in lines)
+
+
+def test_dropbox_auth_workflow_order_and_secret_scoping():
     d, on = _wf("dropbox-auth.yml")
     assert on["push"]["paths"] == ["ops/requests/dropbox-auth.txt"] and d["permissions"] == {"contents": "read"}
-    steps = d["jobs"]["exchange"]["steps"]
+    steps = d["jobs"]["auth"]["steps"]
     names = [s.get("name", "") for s in steps]
-    assert names.index("Exchange authorization code") < names.index("System packages")
+    # コードは数分で失効するので、交換はライブラリの準備より前（標準ライブラリだけで動く）
+    assert names.index("Exchange authorization code") < names.index("Python packages")
     ex = steps[names.index("Exchange authorization code")]
-    assert ex["env"]["DROPBOX_AUTH_CODE"] == "${{ secrets.DROPBOX_AUTH_CODE }}"
+    assert ex["env"]["DROPBOX_AUTH_CODE"] == "${{ secrets.DROPBOX_AUTH_CODE }}" and ex["env"]["PYTHONPATH"] == "src"
+    # PAT は Secrets を扱う2つのステップにだけ渡す
+    with_pat = [s["name"] for s in steps if "GH_SECRETS_TOKEN" in (s.get("env") or {})]
+    assert with_pat == ["Preflight (before authorization)", "Store refresh token in GitHub Secrets"]
+    assert "GH_SECRETS_TOKEN" not in d["jobs"]["auth"]["env"]
     text = (ROOT / ".github/workflows/dropbox-auth.yml").read_text()
-    assert "cache" not in text and "upload-artifact" not in text and "echo $" not in text
+    assert "actions/cache" not in text and "upload-artifact" not in text and "echo $" not in text
+
+
+def test_token_store_exchange_needs_only_stdlib():
+    import subprocess
+    import sys
+    code = ("import sys, builtins; real = builtins.__import__\n"
+            "def guard(n, *a, **k):\n"
+            "    if n.split('.')[0] in ('requests', 'yaml', 'dropbox', 'nacl', 'numpy'): raise ImportError(n)\n"
+            "    return real(n, *a, **k)\n"
+            "builtins.__import__ = guard\n"
+            "import structlab.token_store as t; print(t.UrllibHttp.__name__)")
+    r = subprocess.run([sys.executable, "-c", code], env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "UrllibHttp" in r.stdout, r.stderr

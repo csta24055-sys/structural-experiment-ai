@@ -15,6 +15,8 @@
 - このセッションに認証情報が無くても、GitHub Actions 側で実行できる: `ops/requests/connection-check.txt`（接続確認・読み取りのみ）や
   `ops/requests/analyze.txt`（解析）を変更して push し、ワークフローのログを GitHub のツールで読んで報告する。
   analyze.txt の `allow_external_ai: true` は有料なので、見積もりを伝えて承認を得てからにする
+- Dropbox のリフレッシュトークンは `ops/requests/dropbox-auth.txt`（`mode: preflight` → 本人が許可してコードを Secret
+  `DROPBOX_AUTH_CODE` に登録 → `mode: exchange`）で取得し、Actions が `DROPBOX_REFRESH_TOKEN` に登録する（PAT `GH_SECRETS_TOKEN` を使用）
 - トークンやキーの値を表示・保存・コミットしない（`cat` で中身を見ない。接続確認の出力は伏せ字になる）
 - 途中で止まっても同じコマンドで続きから再開できる
 

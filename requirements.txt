@@ -10,6 +10,9 @@ pillow-heif>=0.16   # iPhone の写真（HEIC）
 # AI解析（Anthropic Claude を使う場合）
 anthropic>=1.0
 
+# GitHub Secrets への登録（値を GitHub の公開鍵で暗号化）
+pynacl>=1.5
+
 # テスト用
 pytest>=8.0
 reportlab>=4.0

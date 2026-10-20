@@ -1,7 +1,9 @@
-# Dropbox の認可コードを GitHub Actions でリフレッシュトークンに交換し、そのまま接続確認する（ショートカット不要）。
-#   1) 利用者: Safari で許可 → 表示されたコードを Secret DROPBOX_AUTH_CODE に登録（数分で失効するのですぐに）
-#   2) Claude Code: ops/requests/dropbox-auth.txt を変更して push → このワークフローが交換し、続けて接続確認
-# トークンはこの実行の中だけで使い（権限600の一時ファイル）、どこにも保存しない。ログにも出さない。
+# Dropbox の認可コードを GitHub Actions でリフレッシュトークンに交換し、GitHub Secrets に登録する。
+#   mode: preflight … 本人認証の前の確認（App key/secret、PAT で Secrets を書き込めるか。Dropbox のコードは使わない）
+#   mode: exchange  … Secret DROPBOX_AUTH_CODE を交換 → DROPBOX_REFRESH_TOKEN に登録 → DROPBOX_AUTH_CODE を削除 → 接続確認
+# 起動: ops/requests/dropbox-auth.txt の mode を書き換えて push（Claude Code が行う）
+# GITHUB_TOKEN は Secrets を書き込めないため、このリポジトリの Secrets 読み書きだけを許可した PAT（Secret GH_SECRETS_TOKEN）を使う。
+# トークンの値はログ・コード・コミットに出さない（GitHub の公開鍵で暗号化して登録し、ログは伏せ字指定）。
 name: Dropbox auth
 
 on:
@@ -17,35 +19,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  exchange:
+  auth:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CLAUDE_API_KEY || secrets.ANTHROPIC_KEY || secrets.CLAUDE_KEY }}
-      SECRET_SET_DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY != '' }}
-      SECRET_SET_DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET != '' }}
-      SECRET_SET_DROPBOX_AUTH_CODE: ${{ secrets.DROPBOX_AUTH_CODE != '' }}
-      SECRET_SET_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
       STRUCTLAB_CONFIG: configs/dropbox.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Mode
+        id: mode
+        run: echo "mode=$(sed -n 's/^mode:[[:space:]]*\([a-z]*\).*/\1/p' ops/requests/dropbox-auth.txt | head -1)" >> "$GITHUB_OUTPUT"
+      # コードは数分で失効するので、ライブラリの準備より先に標準ライブラリだけで交換する
+      - name: Exchange authorization code
+        if: steps.mode.outputs.mode == 'exchange'
+        env:
+          DROPBOX_AUTH_CODE: ${{ secrets.DROPBOX_AUTH_CODE }}
+          PYTHONPATH: src
+        run: python -m structlab.token_store exchange
       - name: Python packages
         run: |
           python -m pip install -q -r requirements.txt
           python -m pip install -q -e .
-      # 時間のかかる準備より先に交換する（コードは数分で失効）
-      - name: Exchange authorization code
+      - name: Preflight (before authorization)
+        if: steps.mode.outputs.mode == 'preflight'
         env:
-          DROPBOX_AUTH_CODE: ${{ secrets.DROPBOX_AUTH_CODE }}
-        run: python -m structlab dropbox-auth exchange
+          GH_SECRETS_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+        run: python -m structlab.token_store preflight
+      - name: Store refresh token in GitHub Secrets
+        if: steps.mode.outputs.mode == 'exchange'
+        env:
+          GH_SECRETS_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+        run: python -m structlab.token_store store
       - name: System packages
+        if: steps.mode.outputs.mode == 'exchange'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q ffmpeg
-      - name: Connection check
+      - name: Connection check (with the new token)
+        if: steps.mode.outputs.mode == 'exchange'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CLAUDE_API_KEY || secrets.ANTHROPIC_KEY || secrets.CLAUDE_KEY }}
         run: python -m structlab -c "$STRUCTLAB_CONFIG" connect-check

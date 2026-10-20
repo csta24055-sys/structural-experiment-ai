@@ -69,15 +69,21 @@ https://www.dropbox.com/oauth2/authorize?response_type=code&token_access_type=of
 - 確実なのは A-5 の接続確認: `/鋼材実験レポート用` が見えれば Full Dropbox。App folder の場合は「何も見えない」と表示されます
 
 
-### A-2/A-3 の代わり: GitHub Actions でコードを交換する（ショートカット不要）
-1. A-3 の URL で「許可」→ 表示されたコードをコピー
-2. すぐに Safari で https://github.com/csta24055-sys/structural-experiment-ai/settings/secrets/actions/new を開き、
-   Name `DROPBOX_AUTH_CODE`、Secret にコードを貼って Add secret（2回目以降は一覧の DROPBOX_AUTH_CODE → Update）
-3. Claude Code に「登録した」と伝える → `ops/requests/dropbox-auth.txt` を push して **Dropbox auth** ワークフローを起動し、
-   交換と接続確認（一覧・動画/PDF/Excel の取得）を行う
+### A-2/A-3 の代わり（推奨）: GitHub Actions で交換し、Secrets に自動登録する（ショートカット不要・本人認証は1回）
+GitHub Actions の自動トークン（GITHUB_TOKEN）は Secrets を書き込めないため、
+**このリポジトリの Secrets 読み書きだけ**を許可した fine-grained PAT を使います。
 
-この方法のトークンはその実行の中だけで使い、どこにも保存しません（GitHub Actions は Secrets を書き込めないため）。
-継続して自動実行するには、トークンを `DROPBOX_REFRESH_TOKEN` に登録するか、保管方法を別途決める必要があります。
+1. PAT を作る（Safari）: https://github.com/settings/personal-access-tokens/new
+   - Token name: `structlab-secrets-writer`、Expiration: 7 days
+   - Repository access: **Only select repositories** → `structural-experiment-ai`
+   - Permissions → Repositories → **Secrets: Read and write**（他は付けない）→ Generate token → 表示された値をコピー
+2. それを Secret `GH_SECRETS_TOKEN` に登録（下の A-4 と同じ画面）
+3. Claude Code が **Dropbox auth**（mode: preflight）を実行: App key/secret の確認、PAT で試験用の Secret を書いて消せるか
+4. 本人認証（1回だけ）: A-3 の URL で「許可」→ コードを Secret `DROPBOX_AUTH_CODE` に登録（数分で失効するのですぐ）→「登録した」と伝える
+5. Claude Code が **Dropbox auth**（mode: exchange）を実行: コードを交換 → `DROPBOX_REFRESH_TOKEN` に登録（GitHub の公開鍵で暗号化）
+   → 使い終わった `DROPBOX_AUTH_CODE` を削除 → 接続確認。続けて Connection check で Secrets からの接続も確認
+6. 終わったら PAT は不要です（期限で失効。すぐ消すなら https://github.com/settings/personal-access-tokens で Delete）。
+   リフレッシュトークンは取り消すまで有効なので、以後は認証のやり直しは不要です
 
 ### A-4. GitHub Secrets に登録する（Safari）
 GitHub アプリでは Secrets を編集できないので Safari で開きます:
