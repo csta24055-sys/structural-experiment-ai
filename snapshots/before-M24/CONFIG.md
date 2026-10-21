@@ -1,0 +1,343 @@
+# 設定ファイル（全文）
+
+## `configs/dropbox.yaml`
+
+```yaml
+# クラウド実行（Claude Code on the web / GitHub Actions）用の設定。秘密情報は含めないこと。
+# 環境変数: DROPBOX_APP_KEY, DROPBOX_REFRESH_TOKEN, (AIを使う場合) ANTHROPIC_API_KEY
+
+source:
+  type: dropbox
+  path: "/鋼材実験レポート用"
+
+output:
+  work_dir: "./work"
+  # 解析結果と処理状況DB(state.db)の保存先。解析対象フォルダの外側。
+  # クラウドのコンテナは使い捨てなので、ここに保存しておくと次回は続きから再開できる。
+  dropbox_path: "/鋼材実験レポート用_解析結果"
+  sync_state: true
+  sync_interval_minutes: 10
+
+stability:
+  min_age_seconds: 600
+  min_stable_seconds: 600
+
+limits:
+  max_file_size_mb: 20000
+  min_free_disk_mb: 3000
+  max_runtime_minutes: 0
+  max_attempts: 3
+
+video:
+  segment_seconds: 120
+
+transcription:
+  backend: faster_whisper
+  # 実際の講義動画で比較（6分間）: small は専門用語の誤り 29 回、large-v3-turbo は 6 回（梁→「針」、加力→「火力」などが減る）
+  model: large-v3-turbo
+  language: ja
+  # 専門用語の手がかり（structlab read では PDF の用語も自動で加える）
+  initial_prompt: "建築構造実験。鉄筋コンクリート（RC）梁のせん断加力実験。梁、柱、柱梁接合部、耐震壁、構造部材実験、構造力学、ガイダンス、PDF、支点、載荷点、変位、変位計、油圧ジャッキ、ロードセル、曲げモーメント、主筋、あばら筋、ひび割れ"
+
+ocr:
+  backend: auto
+
+# 資料の読み取り（structlab read）。docs/READING.md 参照
+reading:
+  # AI の同時呼び出し数
+  ai_workers: 4
+  # Batch API でまとめて送る（料金 50% 引き。結果は通常 1 時間以内、最長 24 時間）
+  batch: true
+  # 資料の役割。match はパスの glob（先頭一致の順）
+  roles:
+    # 先生の実験経過（画面録画）。1→2 で一続き。末尾で冒頭画面に戻った以降（無音）は除外する
+    - match: ["*/鋼材実験経過先生1/*"]
+      kind: experiment
+      who: 先生側の録画
+      window: 15        # 15 秒ごとの区間。各区間で 3 枚（始め・代表・終わり）
+      trim_end: true
+      sequence: teacher
+      order: 1
+      group: 4
+    - match: ["*/鋼材実験経過先生2/*"]
+      kind: experiment
+      who: 先生側の録画
+      window: 15        # 15 秒ごとの区間。各区間で 3 枚（始め・代表・終わり）
+      trim_end: true
+      sequence: teacher
+      order: 2
+      group: 4
+    # 生徒の撮影。表面・裏面を交互に撮影。先生側の末尾処理は適用しない
+    - match: ["*/鋼材実験経過生徒*/*"]
+      kind: experiment
+      who: 生徒の撮影
+      window: 15
+      faces: true
+      sequence: student
+      group: 4
+    # Excel・レポートの作り方（最終成果物の作成に必要な情報を落とさないよう、最高画質で細部まで読む）:
+    # 画面は元の解像度の可逆画像（WebP lossless）で保存。0.5 秒ごとの変化に加え 0.2 秒ごとに見直して短時間の表示も保存。
+    # AI には全体を 2 倍、文字のある部分・操作した部分を 3 倍、AI が求めた部分を 4 倍（元の画素から）で送る。
+    # 音声も合わせて読む。文字起こしは精度の高い large-v3
+    - match: ["*/エクセルの作り方*/*", "*/レポートの作り方*/*"]
+      kind: lecture_detail
+      interval: 0.5
+      asr_model: large-v3
+
+ai:
+  provider: anthropic
+  # false のまま。外部送信は実行時に --allow-external-ai を付けたときだけ行う。
+  allow_external: false
+  model: "claude-opus-5-5"
+  effort: "high"
+  # 上位モデルでの読み直し（空なら使わない）。Fable 5.1 は利用できないため、すべて上の model（現在利用できる最上位）で読む
+  escalation_model: ""
+  escalation_price_input_per_mtok: 10.0
+  escalation_price_output_per_mtok: 50.0
+  max_calls_per_run: 300
+  max_input_tokens_per_run: 3000000
+  max_output_tokens_per_run: 600000
+  price_input_per_mtok: 4.0
+  price_output_per_mtok: 20.0
+
+# 意味理解（局所理解・全体理解・相互照合・指示の網羅的抽出と照合・資料横断の統合）。docs/SEMANTIC.md 参照
+semantic:
+  # 規則による指示抽出・照合・関連付け（AI不使用。常に安全）
+  enabled: true
+  # AIによる意味理解。true でも外部送信の許可（--allow-external-ai）が無ければ実行しない。
+  # 有料APIを使うので、先に `structlab estimate` で呼び出し回数・概算費用を確認すること
+  ai: true
+  # true: 単位ごとの従来のAI解析を、意味理解の場面解析で置き換える（画像の二重送信を避ける）
+  replace_unit_analysis: true
+  # 局所理解と全体理解の相互照合（再解釈）の最大回数。変更がなくなれば早く終わる
+  max_rounds: 2
+  # 指示抽出で前後何場面を文脈として渡すか
+  directive_context_scenes: 1
+  # 第3回照合で前後に広げる秒数
+  verify_expand_seconds: 45
+  # 1資料あたり AI で再照合する指示の上限（超えた分は「要確認」として残す）
+  max_verify_per_doc: 40
+  # 照合時に元動画から画面と音声を取り直す（元ファイルが手元にある場合）
+  reextract_media: true
+  # 再解釈・指示抽出でも画像を送るか（送ると精度は上がるが費用が増える）
+  reinterpret_images: false
+  directive_images: false
+  # 動画の音声の発言者。話者識別はしないので unknown（先生の指示と断定しない）。
+  # 「動画の音声はすべて先生」と確認できたら teacher にする
+  video_speaker: unknown
+
+# 各工程のチェック（AI不使用）。docs/CHECKS.md 参照
+checks:
+  enabled: true
+  # Excel の再計算で読むセル数の上限
+  max_excel_cells: 300000
+  # 独立した再検証（structlab reverify）で1回に扱う件数
+  reverify_limit: 30
+
+# 本人の文章スタイル（最終工程の文章表現の調整だけに使う）。docs/STYLE.md 参照
+style:
+  enabled: false
+  # 文章スタイルPDFの場所（個人情報を含むのでリポジトリには置かない）。どちらか一方
+  pdf_path: ""
+  dropbox_path: ""          # 例: "/鋼材実験レポート用_解析結果/style/writing_style.pdf"（解析対象フォルダの外）
+  max_rules: 120
+  accept_needs_review: false
+```
+
+## `config.example.yaml`
+
+```yaml
+# structlab 設定例。コピーして config.yaml として使ってください（config.yaml は .gitignore 済み）。
+#   cp config.example.yaml config.yaml
+# APIキー・トークンはこのファイルに書かず、環境変数で渡してください（README 参照）。
+
+source:
+  # dropbox | local
+  type: dropbox
+  # 解析対象フォルダ（Dropbox のパス、または type: local の場合はローカルディレクトリ）
+  path: "/鋼材実験レポート用"
+
+output:
+  # 作業ディレクトリ（SQLite・解析結果・一時ファイル）。リポジトリ内の work/ は .gitignore 済み。
+  work_dir: "./work"
+  # 解析結果と処理状況DBを Dropbox にも保存する場合のフォルダ。
+  # 解析対象フォルダの外側である必要があります（内側だとエラーで停止します）。
+  # 空文字なら Dropbox には一切書き込みません（読み取り専用トークンで運用可能）。
+  dropbox_path: ""
+  # Dropbox 上の state.db を起動時に取得して続きから再開するか（クラウド実行向け）
+  sync_state: true
+  # 実行中に state.db / 結果を Dropbox へ保存する間隔（分）
+  sync_interval_minutes: 15
+
+stability:
+  # アップロード途中のファイルを誤解析しないため、サーバー更新時刻からこの秒数が経過するまで待つ
+  min_age_seconds: 300
+  # 前回スキャン時からハッシュ・サイズが変わっていれば、さらにこの秒数待つ
+  min_stable_seconds: 300
+  # 無視するファイル名パターン（一時ファイル・ロックファイル等）
+  ignore_patterns:
+    - "~$*"
+    - ".~lock.*"
+    - "*.tmp"
+    - "*.part"
+    - "*.crdownload"
+    - ".DS_Store"
+    - "desktop.ini"
+    - "Thumbs.db"
+    - ".dropbox*"
+  # 内容が完全に同一（Dropbox content_hash 一致）のファイルは1回だけ解析する
+  dedupe_identical_content: true
+
+limits:
+  # これより大きいファイルは解析せず「skipped」として記録（MB）
+  max_file_size_mb: 20000
+  # ダウンロード前にこの空き容量（MB）+ファイルサイズが確保できなければ待機
+  min_free_disk_mb: 2000
+  # 1回の実行でダウンロードする上限（MB）。0 は無制限
+  max_download_mb_per_run: 0
+  # 1回の実行の最大時間（分）。超えたら安全に停止し、次回続きから再開。0 は無制限
+  max_runtime_minutes: 0
+  # 失敗した単位の自動再試行回数
+  max_attempts: 3
+  # ダウンロードした元ファイルを解析後も残すか（false 推奨: ディスク節約）
+  keep_downloads: false
+
+zip:
+  max_total_uncompressed_mb: 20000
+  max_files: 5000
+  max_compression_ratio: 200
+  max_nesting_depth: 2
+
+pdf:
+  # AI に渡すページ画像の解像度
+  render_dpi: 110
+  # 1ページあたりの抽出テキスト上限（文字）。超過分は分割
+  max_chars_per_unit: 12000
+
+video:
+  # 音声・映像を処理する時間区間（秒）
+  segment_seconds: 120
+  # シーン変化検出用のサンプリング間隔（秒）
+  sample_interval_seconds: 2.0
+  # キーフレームとみなす画面変化量（変化した画素の割合 0〜1）。画面録画なら 0.01〜0.05 程度
+  scene_change_threshold: 0.02
+  # 1区間で保存・解析するキーフレーム上限
+  max_keyframes_per_segment: 6
+  # 重要場面で追加解析を行うか
+  focus_analysis: true
+  # 重要場面とみなす発話キーワード
+  important_keywords: ["重要", "大事", "必ず", "注意", "提出", "締切", "期限", "禁止", "ダメ", "間違え", "ポイント", "覚えて", "レポート", "グラフ", "式"]
+
+excel:
+  # 1単位あたりの行数（大きなシートを分割）
+  rows_per_unit: 500
+  max_cells_per_unit: 20000
+
+transcription:
+  # none | faster_whisper | mock（テスト用）
+  backend: none
+  model: small
+  language: ja
+  device: cpu
+  compute_type: int8
+
+ocr:
+  # auto: tesseract があれば使う / none: 使わない
+  backend: auto
+  languages: "jpn+eng"
+
+ai:
+  # none（AIを使わずローカル抽出のみ）| anthropic | mock（テスト用）
+  provider: none
+  # 外部AIサービスへ資料（画像・テキスト）を送信してよいか。true にしない限り送信しません。
+  allow_external: false
+  model: "claude-opus-5-5"
+  effort: "medium"
+  max_output_tokens: 8000
+  # 拒否応答時にサーバー側で別モデルへフォールバック（Anthropic の server-side fallbacks）
+  use_fallbacks: true
+  # 1回の呼び出しに含める画像の上限
+  max_images_per_call: 6
+  # 画像の長辺ピクセル上限（送信前に縮小）
+  max_image_edge: 1568
+  # API使用量の上限（1回の実行あたり）。0 は無制限
+  max_calls_per_run: 300
+  max_input_tokens_per_run: 3000000
+  max_output_tokens_per_run: 600000
+  # 累計の呼び出し上限。0 は無制限
+  max_calls_total: 0
+  # 概算費用（structlab estimate）の計算に使う料金（USD/100万トークン）。公式料金表で確認すること
+  price_input_per_mtok: 4.0
+  price_output_per_mtok: 20.0
+
+# 意味理解（局所理解・全体理解・相互照合・指示の網羅的抽出と照合・資料横断の統合）。docs/SEMANTIC.md 参照
+semantic:
+  # 規則による指示抽出・照合・関連付け（AI不使用。常に安全）
+  enabled: true
+  # AIによる意味理解。true でも外部送信の許可（--allow-external-ai）が無ければ実行しない。
+  # 有料APIを使うので、先に `structlab estimate` で呼び出し回数・概算費用を確認すること
+  ai: false
+  # true: 単位ごとの従来のAI解析を、意味理解の場面解析で置き換える（画像の二重送信を避ける）
+  replace_unit_analysis: true
+  # 局所理解と全体理解の相互照合（再解釈）の最大回数。変更がなくなれば早く終わる
+  max_rounds: 2
+  # 指示抽出で前後何場面を文脈として渡すか
+  directive_context_scenes: 1
+  # 第3回照合で前後に広げる秒数
+  verify_expand_seconds: 45
+  # 1資料あたり AI で再照合する指示の上限（超えた分は「要確認」として残す）
+  max_verify_per_doc: 40
+  # 照合時に元動画から画面と音声を取り直す（元ファイルが手元にある場合）
+  reextract_media: true
+  # 再解釈・指示抽出でも画像を送るか（送ると精度は上がるが費用が増える）
+  reinterpret_images: false
+  directive_images: false
+  # 動画の音声の発言者。話者識別はしないので unknown（先生の指示と断定しない）。
+  # 「動画の音声はすべて先生」と確認できたら teacher にする
+  video_speaker: unknown
+
+# 各工程のチェック（AI不使用）。docs/CHECKS.md 参照
+checks:
+  enabled: true
+  # Excel の再計算で読むセル数の上限
+  max_excel_cells: 300000
+  # 独立した再検証（structlab reverify）で1回に扱う件数
+  reverify_limit: 30
+
+# 本人の文章スタイル（最終工程の文章表現の調整だけに使う）。docs/STYLE.md 参照
+style:
+  enabled: false
+  # 文章スタイルPDFの場所（個人情報を含むのでリポジトリには置かない）。どちらか一方
+  pdf_path: ""
+  dropbox_path: ""          # 例: "/鋼材実験レポート用_解析結果/style/writing_style.pdf"（解析対象フォルダの外）
+  max_rules: 120
+  accept_needs_review: false
+```
+
+## `ops/requests/connection-check.txt`
+
+```yaml
+# このファイルを変更して push すると、GitHub Actions の「Connection check」が動きます（読み取りのみ・課金なし）。
+# 下の行は実行のきっかけにするための記録です。
+request: 2026-10-20 verify stored DROPBOX_REFRESH_TOKEN
+```
+
+## `ops/requests/dropbox-auth.txt`
+
+```yaml
+# このファイルを変更して push すると、GitHub Actions の「Dropbox auth」が動きます。
+# mode: preflight（本人認証の前の確認） / exchange（DROPBOX_AUTH_CODE を交換して DROPBOX_REFRESH_TOKEN に登録）
+mode: exchange
+request: 2026-10-20 exchange
+```
+
+## `ops/requests/reading.txt`
+
+```yaml
+# このファイルを変更して push すると、GitHub Actions の「Read materials」が動きます（Dropbox は読み取りのみ）。
+# allow_external_ai: true は有料（Claude による画像の書き起こし・用語の訂正）。見積もりを利用者が承認した後だけ true にする。
+allow_external_ai: false
+# count_tokens: true は入力トークンの実測（API の count_tokens。推論しないので課金なし）
+count_tokens: true
+request: 2026-10-21 v7 free pass (Excel/Report: lossless native frames, 0.2 s scan, targeted zooms; others unchanged) + semantic rules + requirements ledger + token counts
+```
