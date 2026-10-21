@@ -1,4 +1,6 @@
 # このファイルを変更して push すると、GitHub Actions の「Read materials」が動きます（Dropbox は読み取りのみ）。
 # allow_external_ai: true は有料（Claude による画像の書き起こし・用語の訂正）。見積もりを利用者が承認した後だけ true にする。
 allow_external_ai: false
-request: 2026-10-21 production reading (v3) — free pass, retry student video after remux fix
+# count_tokens: true は入力トークンの実測（API の count_tokens。推論しないので課金なし）
+count_tokens: true
+request: 2026-10-21 optimized preprocessing (v4: nested crop, rotation fix, native resolution, grid frames) — free pass + input token measurement

@@ -25,7 +25,7 @@ from .inventory import as_dicts, build_inventory, inventory_markdown
 
 READ_KINDS = {"pdf", "video", "audio"}
 #: ローカルの読み取り方法を変えたら上げる（保存済みの読み取り結果を使い直さず、読み直すため）
-READ_VERSION = 3
+READ_VERSION = 4
 TERM = re.compile(r"[一-龥ァ-ヶー]{2,}")
 
 
@@ -93,6 +93,10 @@ class Reader:
         self.out = Path(out_dir or cfg.work_dir / "reading")
         self.provider = provider
         self.escalation = escalation if provider is not None else None
+        # Batch API（50% 引き・結果は最大 24 時間後）。reading.batch: true かつ provider が対応しているとき
+        self.batch = bool(provider is not None and cfg.data.get("reading", {}).get("batch")
+                          and hasattr(provider, "analyze_batch"))
+        self.pending: list = []
         self.log = log
         self.lock = threading.Lock()
         self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "failed": 0, "by_model": {}}
@@ -168,6 +172,11 @@ class Reader:
             return json.loads(path.read_text(encoding="utf-8"))["data"]
         if provider is None:
             return None
+        if self.batch:  # まとめて送る（Batch API）: ここでは依頼を集めるだけ。結果は保存され、次の周回で読まれる
+            with self.lock:
+                if str(path) not in {str(x[0]) for x in self.pending}:
+                    self.pending.append((path, build()))
+            return None
         limit = self.cfg.data.get("reading", {}).get("max_ai_calls")
         with self.lock:
             if limit and self.usage["calls"] >= int(limit):
@@ -196,6 +205,53 @@ class Reader:
                                    ensure_ascii=False, indent=1), encoding="utf-8")
         return resp.data
 
+    def flush_batch(self) -> int:
+        """集めた依頼を Batch API で送り（50% 引き）、終わるまで待って結果を保存する。送った件数を返す。"""
+        if not self.pending:
+            return 0
+        pending, self.pending = self.pending, []
+        limit = self.cfg.data.get("reading", {}).get("max_ai_calls")
+        if limit:
+            room = max(0, int(limit) - self.usage["calls"])
+            if len(pending) > room:
+                self.log(f"  上限（reading.max_ai_calls={limit}）のため {len(pending) - room} 件は送らない")
+                pending = pending[:room]
+        if not pending:
+            return 0
+        self.log(f"  Batch API で {len(pending)} 件を送信（結果が出るまで待つ）")
+        # 送信済みの Batch の ID を保存しておき、待っている間に中断されても、次の実行で同じ依頼を二重に送らない
+        import hashlib as _h
+        key = _h.sha256("\n".join(str(x[0]) for x in pending).encode()).hexdigest()[:16]
+        state_path = self.out / "batch_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        known = {int(b): i for b, i in state.get(key, {}).items()}
+
+        def created(base, batch_id):
+            state.setdefault(key, {})[str(base)] = batch_id
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+        results = self.provider.analyze_batch([req for _, req in pending], log=self.log, known=known,
+                                              on_created=created)
+        for (path, req), res in zip(pending, results):
+            if isinstance(res, Exception):
+                self.usage["failed"] += 1
+                self.log(f"  AI の読み取りに失敗（{req.source_label}）: {type(res).__name__}: {str(res)[:200]}")
+                continue
+            self.usage["calls"] += 1
+            self.usage["input_tokens"] += res.input_tokens
+            self.usage["output_tokens"] += res.output_tokens
+            m = self.usage["by_model"].setdefault(res.model or self.provider.model,
+                                                  {"calls": 0, "input_tokens": 0, "output_tokens": 0})
+            m["calls"] += 1
+            m["input_tokens"] += res.input_tokens
+            m["output_tokens"] += res.output_tokens
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"model": res.model, "input_tokens": res.input_tokens,
+                                        "output_tokens": res.output_tokens, "batch": True,
+                                        "cache_read_tokens": getattr(res, "cache_read_tokens", 0), "data": res.data},
+                                       ensure_ascii=False, indent=1), encoding="utf-8")
+        return len(pending)
+
     def _parallel(self, jobs: list) -> None:
         workers = max(1, int(self.cfg.data.get("reading", {}).get("ai_workers", 4)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -223,6 +279,24 @@ class Reader:
         uniq = [sc for sc in rec["scenes"] if sc.get("same_as") is None]
         ref = next((sc["frame"] for sc in rec["scenes"] if sc.get("mode") == "experiment"), None)
         who = role.get("who", "")
+        exp = [sc for sc in uniq if sc.get("mode") == "experiment"]
+        uniq = [sc for sc in uniq if sc.get("mode") != "experiment"]
+        groups = ai_read.experiment_groups(exp, int(role.get("group", ai_read.EXPERIMENT_GROUP)))
+
+        def group_job(k, grp):
+            def run():
+                prev = ai_read.window_frames(groups[k - 1][-1])[-1] if k > 0 else None
+                key = f"exp_{grp[0]['index']:04d}_{grp[-1]['index']:04d}"
+                data = self._ai_cached(rec, key, lambda: ai_read.experiment_group_request(
+                    label, grp, fmt_time, ref, prev, who))
+                got = {int(w.get("window", 0)): w for w in (data or {}).get("windows", [])}
+                for n, sc in enumerate(grp, 1):
+                    w = got.get(n)
+                    sc["ai"] = {k2: v for k2, v in w.items() if k2 != "window"} if w else None
+                    sc["ai_model"] = "main"
+                    sc["ai_group"] = key
+            return run
+        self._parallel([group_job(k, g) for k, g in enumerate(groups)])
 
         def scene_job(sc):
             def run():
@@ -254,6 +328,8 @@ class Reader:
         """文字起こしの専門用語の誤認識を、資料（スライドの書き起こし・OCR・PDF）の用語を根拠に訂正する。"""
         if not rec.get("speech"):
             return
+        if self.batch and any(sc.get("ai") is None for sc in rec["scenes"] if sc.get("same_as") is None):
+            return  # 用語の根拠に画面の書き起こしを使うので、画面を読み終えた次の周回で行う
         parts = [self.pdf_vocab]
         for sc in rec["scenes"]:
             if sc.get("same_as") is None:
@@ -312,7 +388,8 @@ class Reader:
 
 
 def run_reading(cfg, *, only: list[str] | None = None, allow_ai: bool = False, provider=None,
-                out_dir: Path | None = None, log=print, source=None, transcriber=None, escalation=None) -> dict:
+                out_dir: Path | None = None, log=print, source=None, transcriber=None, escalation=None,
+                counter=None) -> dict:
     from ..sources import make_source
     from .report import write_reports
 
@@ -339,17 +416,77 @@ def run_reading(cfg, *, only: list[str] | None = None, allow_ai: bool = False, p
     ok = {k: r for k, r in records.items() if not r.get("error")}
     reader.pdf_vocab = "\n".join(p["text_layer"] for r in ok.values() if r["kind"] == "pdf" for p in r["pages"])
     est = ai_read.estimate_calls(ok)
+    ai_cfg = cfg.data["ai"]
+    plan = ai_read.estimate_plan({p: r for p, r in ok.items() if not only or any(o in p for o in only)},
+                                 price_in=float(ai_cfg.get("price_input_per_mtok", 4.0)),
+                                 price_out=float(ai_cfg.get("price_output_per_mtok", 20.0)),
+                                 batch=bool(cfg.data.get("reading", {}).get("batch")))
+    reader.out.mkdir(parents=True, exist_ok=True)
+    (reader.out / "estimate_plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
     if allow_ai and reader.provider is not None:
-        for path, rec in ok.items():
-            # --only のときは指定した資料だけ AI で読む（PDF は照合・用語のためにどのジョブでも読むが、AI は PDF のジョブだけ）
-            if not only or any(o in path for o in only):
+        chosen = [rec for path, rec in ok.items() if not only or any(o in path for o in only)]
+        # --only のときは指定した資料だけ AI で読む（PDF は照合・用語のためにどのジョブでも読むが、AI は PDF のジョブだけ）
+        for _round in range(4):  # Batch API: 依頼を集めて送り、結果を保存して読み直す（訂正などは前の結果を使うので数周）
+            for rec in chosen:
                 reader.ai_read(rec)
+            if not reader.batch or not reader.flush_batch():
+                break
+    if counter is not None:  # 入力トークンの実測（無料）。結果は token_counts.json
+        tc = count_tokens({p: r for p, r in ok.items() if not only or any(o in p for o in only)}, counter,
+                          reader.pdf_vocab, log)
+        (reader.out / "token_counts.json").write_text(json.dumps(tc, ensure_ascii=False, indent=1), encoding="utf-8")
     reader.verify(ok)
     summary = write_reports(cfg, reader.out, items, records, est, reader.usage, ai_enabled=reader.provider is not None)
     if not only:  # 全資料を読んだときは、資料をまたぐ整理（重複・差分、実験経過の時間軸、先生と生徒の対応）も行う
         from .corpus import analyze_corpus
         analyze_corpus(cfg, reader.out, items, ok, provider=escalation or provider if allow_ai else None, log=log)
     return summary
+
+
+def all_requests(rec: dict, vocab: str = "") -> list:
+    """資料1件で AI に送る依頼をすべて組み立てる（送らない）。入力トークンの実測（count_tokens）に使う。"""
+    label = rec["path"]
+    role = rec.get("role") or {}
+    if rec["kind"] == "pdf":
+        return [ai_read.pdf_page_request(label, p) for p in rec["pages"]]
+    uniq = [sc for sc in rec["scenes"] if sc.get("same_as") is None]
+    exp = [sc for sc in uniq if sc.get("mode") == "experiment"]
+    ref = exp[0]["frame"] if exp else None
+    groups = ai_read.experiment_groups(exp, int(role.get("group", ai_read.EXPERIMENT_GROUP)))
+    reqs = [ai_read.experiment_group_request(label, g, fmt_time, ref,
+                                             ai_read.window_frames(groups[k - 1][-1])[-1] if k else None,
+                                             role.get("who", "")) for k, g in enumerate(groups)]
+    reqs += [ai_read.video_scene_request(label, sc, fmt_time) for sc in uniq if sc.get("mode") != "experiment"]
+    reqs += [ai_read.speech_fix_request(label, i, segs, vocab, fmt_time)
+             for i, segs in ai_read.speech_chunks(rec.get("speech", []))]
+    return reqs
+
+
+def count_tokens(records: dict[str, dict], counter, vocab: str = "", log=print) -> dict:
+    """依頼ごとの入力トークンを API の count_tokens で数える（推論しないので課金なし）。"""
+    import time as _t
+    out = {}
+    for path, rec in records.items():
+        kinds: dict = {}
+        for req in all_requests(rec, vocab):
+            for attempt in range(5):
+                try:
+                    n = counter.count_input_tokens(req)
+                    break
+                except Exception as e:  # noqa: BLE001  レート制限などは待ってやり直す
+                    if attempt == 4:
+                        log(f"  入力トークンを数えられない（{req.source_label}）: {type(e).__name__}: {str(e)[:150]}")
+                        n = None
+                    _t.sleep(2 ** attempt)
+            k = kinds.setdefault(req.task, {"requests": 0, "input_tokens": 0, "uncounted": 0})
+            k["requests"] += 1
+            if n is None:
+                k["uncounted"] += 1
+            else:
+                k["input_tokens"] += n
+        out[path] = kinds
+        log(f"  入力トークン（実測）: {path}: " + "、".join(f"{t} {v['requests']} 件 {v['input_tokens']:,}" for t, v in kinds.items()))
+    return out
 
 
 def list_targets(cfg, source, with_hash: bool = False) -> list:

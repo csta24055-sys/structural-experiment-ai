@@ -348,3 +348,110 @@ def test_role_matching_and_teacher_timeline_is_not_filled():
                                                                   if "先生2" in w["source"])
     sv = student_observations(recs)["videos"]
     assert len(sv) == 1 and sv[0]["windows"][0]["end"] == 90  # 生徒の動画は末尾除外・連結をしない
+
+
+def _player_stack(n=6, inner=(60, 150, 120, 300), rotate=False):
+    """ブラウザ（上が白い帯）の暗い動画プレーヤーの中に、明るい動画がある画面（縮小・グレースケール）。"""
+    import numpy as np
+    rng = np.random.default_rng(1)
+    out = []
+    for _ in range(n):
+        f = np.full((166, 360), 18, np.int16)
+        f[:25, :] = 250                       # アドレスバー
+        a, b, c0, c1 = inner
+        f[a:b, c0:c1] = rng.integers(120, 255, (b - a, c1 - c0))
+        out.append(np.rot90(f, -1) if rotate else f)
+    return np.stack(out)
+
+
+def test_content_box_finds_video_inside_browser_player():
+    from structlab.media import content_box
+    a, b, c0, c1 = content_box(_player_stack())
+    assert abs(a - 60) <= 3 and abs(b - 150) <= 3 and abs(c0 - 120) <= 3 and abs(c1 - 300) <= 3
+    # 明るいスライドの中の文字の塊までは切り込まない（外側が暗い余白でないときは入れ子として扱わない）
+    import numpy as np
+    s = np.full((4, 166, 360), 18, np.int16)
+    s[:, 40:130, 30:330] = 240
+    s[:, 70:90, 100:200] = 20
+    a, b, c0, c1 = content_box(s)
+    assert a <= 41 and b >= 129 and c0 <= 31 and c1 >= 329
+
+
+def test_orientation_runs_detect_sideways_screen_and_ignore_blips():
+    import numpy as np
+    from structlab.media import orientation_runs, ui_orientation
+    normal = np.full((111, 240), 20, np.uint8)
+    normal[:12] = 250
+    side = np.full((111, 240), 20, np.uint8)
+    side[:, -26:] = 250
+    assert ui_orientation(normal) == 0 and ui_orientation(side) == 90 and ui_orientation(side[:, ::-1]) == 270
+    frames = [normal] * 5 + [side] + [normal] * 4 + [side] * 6
+    runs = orientation_runs([float(2 * i) for i in range(len(frames))], frames)
+    assert [r[2] for r in runs] == [0, 90] and runs[1][0] == 20.0  # 1回だけの揺れは無視
+
+
+def test_frame_size_keeps_native_resolution():
+    from structlab.media import Region
+    from structlab.reading.video_read import frame_size
+    assert frame_size(Region(0, 0, 1920, 1080, 1920, 1080)) == {"max_width": 1568, "min_width": 0}
+    assert frame_size(Region(10, 10, 1196, 670, 2532, 1170)) == {"max_width": 1196, "min_width": 0}
+    small = frame_size(Region(10, 10, 668, 508, 1170, 2532))
+    assert small["max_width"] == 1000 and small["min_width"] == 1000  # 小さい領域だけ長辺 1000 まで拡大
+    tall = frame_size(Region(0, 0, 1170, 2532, 1170, 2532))
+    assert tall["max_width"] == int(1568 * 1170 / 2532) - int(1568 * 1170 / 2532) % 2
+
+
+def test_experiment_grid_is_evenly_spaced_and_groups_respect_segments():
+    from structlab.reading import ai_read
+    from structlab.reading.video_read import experiment_grid
+    pts = experiment_grid(0, 15) + experiment_grid(15, 30)
+    gaps = [b - a for a, b in zip(pts, pts[1:])]
+    assert gaps == [7.5, 7.5, 7.5]
+    scenes = [{"index": i, "segment": 0 if i < 6 else 1, "start": 15 * i, "end": 15 * i + 15} for i in range(9)]
+    groups = ai_read.experiment_groups(scenes, 4)
+    assert [[s["index"] for s in g] for g in groups] == [[0, 1, 2, 3], [4, 5], [6, 7, 8]]
+
+
+def test_grouped_experiment_request_shares_reference(tmp_path):
+    from PIL import Image
+    from structlab.models import fmt_time
+    from structlab.reading import ai_read
+    fs = []
+    for i in range(9):
+        f = tmp_path / f"f{i}.jpg"
+        Image.new("RGB", (100, 60), "gray").save(f)
+        fs.append(str(f))
+    scenes = [{"index": i, "start": 15 * i, "end": 15 * i + 15, "frame_time": 15 * i + 3.75, "frame": fs[2 * i],
+               "events_with_frames": [{"time": 15 * i + 11.25, "frame": fs[2 * i + 1]}], "speech": []} for i in range(4)]
+    req = ai_read.experiment_group_request("x", scenes, fmt_time, fs[8], (0.0, fs[8]), "先生")
+    assert len(req.images) == 1 + 1 + 8 and req.schema is ai_read.EXPERIMENT_GROUP_SCHEMA
+    assert "区間4" in req.images[-1].label and "基準画像" in req.images[0].label
+
+
+def test_batch_mode_collects_then_reads_saved_results(tmp_path):
+    from structlab.reading.runner import Reader
+    cfg = make_cfg(tmp_path, tmp_path)
+    cfg.data.setdefault("reading", {})["batch"] = True
+    sent = []
+
+    class FakeBatch:
+        model = "claude-opus-5-5"
+
+        def analyze_batch(self, reqs, log=print, known=None, on_created=None):
+            sent.extend(reqs)
+            if on_created:
+                on_created(0, "batch_1")
+            return [AIResponse(data={"n": i}, model=self.model, input_tokens=10, output_tokens=5, raw_text="")
+                    for i, _ in enumerate(reqs)]
+
+        def analyze(self, req):
+            raise AssertionError("Batch のときは1件ずつ送らない")
+
+    r = Reader(cfg, out_dir=tmp_path / "out", provider=FakeBatch(), log=lambda m: None)
+    rec = {"dir": str(tmp_path / "rec")}
+    assert r._ai_cached(rec, "a", lambda: SimpleNamespace(source_label="a")) is None
+    assert r._ai_cached(rec, "b", lambda: SimpleNamespace(source_label="b")) is None
+    assert r._ai_cached(rec, "a", lambda: SimpleNamespace(source_label="a")) is None  # 同じ項目は1回だけ
+    assert r.flush_batch() == 2 and len(sent) == 2
+    assert r._ai_cached(rec, "b", lambda: None) == {"n": 1} and r.usage["calls"] == 2
+    assert json.loads((tmp_path / "out" / "batch_state.json").read_text())  # 中断しても送り直さないための記録

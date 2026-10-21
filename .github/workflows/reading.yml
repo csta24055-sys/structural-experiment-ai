@@ -32,6 +32,7 @@ jobs:
     outputs:
       targets: ${{ steps.t.outputs.targets }}
       allow_ai: ${{ steps.t.outputs.allow_ai }}
+      count_tokens: ${{ steps.t.outputs.count_tokens }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,11 +46,13 @@ jobs:
           echo "targets=$(python -m structlab -c "$STRUCTLAB_CONFIG" read --list-targets)" >> "$GITHUB_OUTPUT"
           AI=$(sed -n 's/^allow_external_ai:[[:space:]]*\(true\|false\).*/\1/p' ops/requests/reading.txt | head -1)
           echo "allow_ai=${AI:-false}" >> "$GITHUB_OUTPUT"
+          CT=$(sed -n 's/^count_tokens:[[:space:]]*\(true\|false\).*/\1/p' ops/requests/reading.txt | head -1)
+          echo "count_tokens=${CT:-false}" >> "$GITHUB_OUTPUT"
 
   read:
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 355
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -87,6 +90,8 @@ jobs:
         run: |
           FLAGS=""
           if [ "${{ needs.plan.outputs.allow_ai }}" = "true" ]; then FLAGS="--allow-external-ai"; fi
+          # 入力トークンの実測（count_tokens。推論しないので課金なし）
+          if [ "${{ needs.plan.outputs.count_tokens }}" = "true" ]; then FLAGS="$FLAGS --count-tokens"; fi
           python -m structlab -c "$STRUCTLAB_CONFIG" read --only "$TARGET" --out work/reading $FLAGS
       - name: Save reading of this file
         if: always()

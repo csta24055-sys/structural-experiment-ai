@@ -34,11 +34,28 @@ def merge(dirs: list[Path]) -> dict:
             for k in usage:
                 usage[k] += s["ai_usage"].get(k, 0)
     est["total_calls"] = sum(est["calls"].values())
+    # 最適化した構成の見積もり（資料ごと。PDF はどのジョブにもあるので1回だけ数える）
+    plan_files: dict[str, dict] = {}
+    for d in dirs:
+        for pp in sorted(Path(d).rglob("estimate_plan.json")):
+            for f in json.loads(pp.read_text(encoding="utf-8"))["files"]:
+                plan_files.setdefault(f["path"], f)
+    plan = {"files": list(plan_files.values()),
+            "usd": round(sum(f["usd"] for f in plan_files.values()), 2),
+            "calls": sum(f["calls"] for f in plan_files.values()),
+            "input_tokens": sum(f["input_tokens"] for f in plan_files.values()),
+            "output_tokens": sum(f["output_tokens"] for f in plan_files.values())}
     counts = {"ok": 0, "needs_review": 0, "unverified": 0, "text_only": 0}
     for f in files.values():
         for k, v in (f.get("status") or {}).items():
             counts[k] = counts.get(k, 0) + v
-    return {"files": list(files.values()), "estimate": est, "ai_usage": usage, "status_counts": counts}
+    counted: dict[str, dict] = {}
+    for d in dirs:
+        for tp in sorted(Path(d).rglob("token_counts.json")):
+            for path, kinds in json.loads(tp.read_text(encoding="utf-8")).items():
+                counted.setdefault(path, kinds)
+    plan["measured_input"] = counted
+    return {"files": list(files.values()), "estimate": est, "plan": plan, "ai_usage": usage, "status_counts": counts}
 
 
 def to_markdown(m: dict) -> str:
@@ -57,6 +74,18 @@ def to_markdown(m: dict) -> str:
     lines += ["", f"AI の読み取りの見積もり: {e['total_calls']} 回 {e['calls']}、画像 {e['images']} 枚、"
               f"入力 {e['input_tokens']:,}・出力 {e['output_tokens']:,} トークン → 約 ${e['usd']:.2f}",
               f"今回の AI 使用: {u['calls']} 回（失敗 {u['failed']}）、入力 {u['input_tokens']:,}・出力 {u['output_tokens']:,} トークン"]
+    pl = m.get("plan") or {}
+    if pl.get("files"):
+        lines += ["", f"最適化した構成の見積もり（Batch・区間のまとめ・元の解像度）: {pl['calls']} 回、"
+                      f"入力 {pl['input_tokens']:,}・出力 {pl['output_tokens']:,} トークン（出力は推測）→ 約 ${pl['usd']:.2f}"]
+        mi = pl.get("measured_input") or {}
+        if mi:
+            tot = sum(v["input_tokens"] for k in mi.values() for v in k.values())
+            lines.append(f"入力トークンの実測（count_tokens・課金なし）: 合計 {tot:,}（{len(mi)} 資料）")
+            lines += [f"  - {path}: " + "、".join(f"{t} {v['requests']} 件 {v['input_tokens']:,}" for t, v in k.items())
+                      for path, k in mi.items()]
+        lines += [f"- {f['path']}: {f['calls']} 回 約 ${f['usd']:.2f} " +
+                  "、".join(f"{k} {v['calls']} 回 ${v['usd']:.2f}" for k, v in f["by_kind"].items()) for f in pl["files"]]
     return "\n".join(lines) + "\n"
 
 

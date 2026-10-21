@@ -53,6 +53,78 @@ class AnthropicProvider(AIProvider):
             content.append({"type": "text", "text": build_user_text(req.task, req.source_label, req.text)})
         return content
 
+    def _params(self, req: AIRequest) -> dict:
+        """Batch API 用の1件分の依頼。指示文はキャッシュ（同じ指示の2件目以降は入力が安くなる）。"""
+        return dict(
+            model=self.model,
+            max_tokens=req.max_tokens or self.max_tokens,
+            system=[{"type": "text", "text": req.system or SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": self._content(req)}],
+            output_config={"effort": self.effort,
+                           "format": {"type": "json_schema", "schema": req.schema or OUTPUT_SCHEMA}},
+        )
+
+    def analyze_batch(self, reqs: list[AIRequest], *, poll_seconds: int = 60, log=print,
+                      known: dict | None = None, on_created=None) -> list:
+        """Message Batches API でまとめて送る（料金は通常の 50%）。各依頼の AIResponse か例外を順に返す。
+        結果は通常 1 時間以内、最長 24 時間。サーバー側のモデル切り替え（fallbacks）は Batch では使えない。"""
+        import time
+        out: list = [AIError("未処理", retryable=True)] * len(reqs)
+        chunk = 500  # 1回の送信を小さく保つ（上限 256MB）
+        for base in range(0, len(reqs), chunk):
+            part = reqs[base:base + chunk]
+            if known and base in known:  # 前回の実行で送信済み（時間切れなどで中断）: 送り直さず結果を取りに行く
+                batch = self.client.messages.batches.retrieve(known[base])
+                log(f"  Batch {batch.id}: 送信済みの結果を待つ")
+            else:
+                batch = self.client.messages.batches.create(
+                    requests=[{"custom_id": f"r{base + i}", "params": self._params(r)} for i, r in enumerate(part)])
+                log(f"  Batch {batch.id}: {len(part)} 件")
+                if on_created:
+                    on_created(base, batch.id)
+            while True:
+                batch = self.client.messages.batches.retrieve(batch.id)
+                if batch.processing_status == "ended":
+                    break
+                time.sleep(poll_seconds)
+            for item in self.client.messages.batches.results(batch.id):
+                i = int(item.custom_id[1:])
+                r = item.result
+                if r.type != "succeeded":
+                    out[i] = AIError(f"Batch の結果: {r.type} {getattr(getattr(r, 'error', None), 'type', '')}",
+                                     retryable=r.type != "errored")
+                    continue
+                try:
+                    out[i] = self._response(r.message)
+                except AIError as e:
+                    out[i] = e
+        return out
+
+    def _response(self, resp) -> AIResponse:
+        usage = getattr(resp, "usage", None)
+        in_tok = (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "cache_read_input_tokens", 0) or 0) \
+            + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        out_tok = getattr(usage, "output_tokens", 0) or 0
+        if resp.stop_reason == "refusal":
+            raise AIError("AIが解析を拒否しました（refusal）", retryable=False)
+        if resp.stop_reason == "max_tokens":
+            raise AIError("出力が上限で途切れました（ai.max_output_tokens を増やしてください）", retryable=False)
+        text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise AIError(f"AI出力がJSONではありません: {text[:200]}", retryable=True) from e
+        r = AIResponse(data=data, model=getattr(resp, "model", self.model), input_tokens=in_tok,
+                       output_tokens=out_tok, raw_text=text)
+        r.cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
+        return r
+
+    def count_input_tokens(self, req: AIRequest) -> int:
+        """入力トークン数を数える（推論はしないので課金なし）。見積もりの実測に使う。"""
+        p = self._params(req)
+        return self.client.messages.count_tokens(model=p["model"], system=p["system"], messages=p["messages"],
+                                                 output_config=p["output_config"]).input_tokens
+
     def analyze(self, req: AIRequest) -> AIResponse:
         a = self._anthropic
         kwargs = dict(

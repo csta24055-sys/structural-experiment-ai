@@ -68,7 +68,7 @@ DEFAULTS: dict[str, Any] = {
         "max_output_tokens": 8000,
         "use_fallbacks": True,
         "max_images_per_call": 6,
-        "max_image_edge": 1568,
+        "max_image_edge": 2576,  # 画面は読み取り時に必要な大きさで保存するので、ここでは縮めない（API の上限）
         "max_calls_per_run": 300,
         "max_input_tokens_per_run": 3_000_000,
         "max_output_tokens_per_run": 600_000,

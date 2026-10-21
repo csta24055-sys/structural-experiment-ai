@@ -598,10 +598,16 @@ def cmd_read(args) -> int:
         escalation = make_escalation_provider(cfg, allow_external_flag=True)
     else:
         escalation = None
+    counter = None
+    if args.count_tokens:  # 入力トークンの実測（count_tokens。推論しないので課金なし。内容は API に送られる）
+        from .ai.anthropic_provider import AnthropicProvider
+        ai = cfg.data["ai"]
+        counter = AnthropicProvider(model=ai["model"], effort=ai["effort"], max_tokens=ai["max_output_tokens"],
+                                    use_fallbacks=False, max_image_edge=ai["max_image_edge"])
     if args.max_ai_calls is not None:
         cfg.data.setdefault("reading", {})["max_ai_calls"] = args.max_ai_calls
     summary = run_reading(cfg, only=args.only, allow_ai=args.allow_external_ai, provider=provider,
-                          escalation=escalation,
+                          escalation=escalation, counter=counter,
                           out_dir=Path(args.out) if args.out else None, log=lambda m: print(m, flush=True))
     out = Path(args.out) if args.out else cfg.work_dir / "reading"
     print((out / "summary.md").read_text(encoding="utf-8"))
@@ -684,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-ai-calls", type=int, default=None)
     p.add_argument("--out", help="出力先（既定: work/reading）")
     p.add_argument("--list-targets", action="store_true", help="読み取る資料（重複を除く）の一覧を JSON で出す")
+    p.add_argument("--count-tokens", action="store_true",
+                   help="AI に送る依頼の入力トークンを API の count_tokens で数える（推論しないので課金なし）")
     p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")
     p.add_argument("--no-download", action="store_true", help="動画・PDF・Excel の見本の取得を省略")
     p.add_argument("--no-claude", action="store_true")

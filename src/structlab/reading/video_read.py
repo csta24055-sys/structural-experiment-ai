@@ -87,6 +87,30 @@ def _stream_seconds(s: dict) -> float:
     return 0.0
 
 
+def split_by_orientation(path: Path, segs: list[dict], log=print, step: float = 2.0) -> list[dict]:
+    """画面録画の途中で端末を回し、画面の内容が横倒しになっている部分（録画の縦横は同じまま）を分ける。
+    ブラウザ・端末の明るい帯が右（または左）にある時間を「回っている」とみなし、rotate を付けた区間にする。"""
+    out: list[dict] = []
+    for seg in segs:
+        w = 240
+        h = max(2, int(round(seg["h"] * w / seg["w"] / 2)) * 2)
+        try:
+            sm = media.sample_gray_frames(path, seg["start"], seg["end"] - seg["start"], step, w=w, h=h)
+        except media.MediaError:
+            sm = []
+        runs = media.orientation_runs([t for t, _ in sm], [f for _, f in sm])
+        if len(runs) <= 1:
+            out.append({**seg, "rotate": runs[0][2] if runs else 0})
+            continue
+        for k, (a, b, rot) in enumerate(runs):
+            s0 = seg["start"] if k == 0 else round((runs[k - 1][1] + a) / 2, 3)
+            s1 = seg["end"] if k == len(runs) - 1 else round((b + runs[k + 1][0]) / 2, 3)
+            out.append({**seg, "start": s0, "end": s1, "rotate": rot})
+        log("  画面の向き: " + "、".join(f"{a / 60:.1f}–{b / 60:.1f} 分 {'そのまま' if r == 0 else f'{r} 度回して補正'}"
+                                       for a, b, r in runs))
+    return out
+
+
 def audio_profile(path: Path, info: media.ProbeInfo, until: float) -> dict:
     """音声トラックの長さと無音区間。音声が無い部分は文字起こししない（書き起こしを作らない）ために使う。"""
     import json as _json
@@ -240,6 +264,42 @@ def typical_time(sc: dict, times: list[float], frames: list[np.ndarray]) -> floa
     return float(times[idx[int(np.argmin(cost))]])
 
 
+#: 画面の保存サイズ。切り出した資料は元の解像度のまま（拡大しても情報は増えず、AI の画像トークンが増えるだけ）。
+#: ただし長辺がこれより小さいときだけ拡大する。画面全体（カメラ映像など）は長辺 FRAME_FULL_EDGE に縮める
+FRAME_MIN_EDGE = 1000
+FRAME_FULL_EDGE = 1568
+FRAME_MAX_EDGE = 2576  # AI に送れる最大の長辺
+
+
+def frame_size(region: media.Region, min_edge: int = FRAME_MIN_EDGE) -> dict:
+    """extract_frame に渡す幅の上限・下限（元の解像度を基本に、上の規則で決める）。"""
+    w, h = region.w, region.h
+    if region.is_full:
+        edge = min(FRAME_FULL_EDGE, max(w, h))
+    else:
+        edge = min(FRAME_MAX_EDGE, max(min_edge, max(w, h)))
+    width = edge if w >= h else int(edge * w / h)
+    width -= width % 2
+    return {"max_width": max(width, 2), "min_width": width if width > w else 0}
+
+
+def experiment_grid(start: float, end: float) -> list[float]:
+    """実験経過の区間で AI に送る画面の時刻: 区間の 1/4 と 3/4（区間をまたいでも間隔が等しく、最大の間隔は区間の半分）。"""
+    d = end - start
+    return [start + d / 4, start + 3 * d / 4] if d > 2.0 else [start + d / 2]
+
+
+def clear_time(g: float, times: list[float], frames: list[np.ndarray], span: float = 2.0) -> float:
+    """格子点 g の前後 span 秒で、その間の典型的な画面に最も近い時刻（人の横切り・手ぶれなどの一時的な画面を避ける）。"""
+    idx = [k for k, t in enumerate(times) if abs(t - g) <= span]
+    if len(idx) < 2:
+        return g
+    stack = np.stack([frames[k] for k in idx]).astype(np.int16)
+    med = np.median(stack, axis=0)
+    cost = [float(np.abs(stack[j] - med).mean()) + 0.5 * abs(times[idx[j]] - g) for j in range(len(idx))]
+    return float(times[idx[int(np.argmin(cost))]])
+
+
 # ---------------- 末尾の除外（実験経過動画） ----------------
 def detect_return_to_start(times: list[float], frames: list[np.ndarray], audio: dict, duration: float) -> dict:
     """実験映像を再生し終えて録画の冒頭画面に戻った時刻を、次の3つがそろったときだけ決める（推測では除外しない）:
@@ -291,7 +351,11 @@ def ocr_image(ocr: media.OCR, path: Path) -> str:
         return ""
     from PIL import Image
     g = path.with_name(path.stem + "_g.png")
-    Image.open(path).convert("L").save(g)
+    im = Image.open(path).convert("L")
+    if im.width < 1600:  # 画面は元の解像度で保存しているので、OCR（小さい文字に弱い）のためだけに拡大する
+        k = 1600 / im.width
+        im = im.resize((1600, int(im.height * k)), Image.LANCZOS)
+    im.save(g)
     texts = []
     for psm in ("11", "6"):
         try:
@@ -311,7 +375,7 @@ def ocr_image(ocr: media.OCR, path: Path) -> str:
 
 
 def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.Transcriber | None,
-               interval: float = 1.0, max_events_per_scene: int = 4, frame_width: int = 1800,
+               interval: float = 1.0, max_events_per_scene: int = 4, frame_width: int = FRAME_MIN_EDGE,
                asr_chunk: float = 600.0, role: dict | None = None, meta_path: Path | None = None, log=print) -> dict:
     """role: {"kind": "experiment", "window": 15, "trim_end": True} など（資料の役割。configs の reading.roles）
     meta_path: 元のファイル（path が入れ直した MKV のとき）。録画の長さは元のファイルで測る"""
@@ -324,14 +388,15 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
     valid_end = info.duration
     sampled_all: list[tuple[float, np.ndarray, int]] = []
     if info.has_video:
-        segs = size_segments(path, info)
+        segs = split_by_orientation(path, size_segments(path, info), log)
         rec["orientation_changes"] = [s["start"] for s in segs[1:]]
         for si, seg in enumerate(segs):
             sinfo = replace(info, width=seg["w"], height=seg["h"], duration=info.duration)
-            region = media.detect_content_region(path, sinfo, seg["start"], seg["end"] - seg["start"])
+            region = media.detect_content_region(path, sinfo, seg["start"], seg["end"] - seg["start"],
+                                                 rotate=seg.get("rotate", 0))
             seg["region"] = region.as_dict()
             seg["region_cropped"] = not region.is_full
-            crop = None if region.is_full else region.ffmpeg_crop()
+            crop = region.vf()
             w = 240
             h = max(2, int(round(region.h * w / region.w / 2)) * 2)
             log(f"  画面の変化を解析（{seg['start'] / 60:.1f}–{seg['end'] / 60:.1f} 分、"
@@ -375,7 +440,11 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
         region = seg["_region"]
         for sc in scenes:
             i = len(scenes_all)
-            t = typical_time(sc, times, frames)
+            if mode == "experiment":
+                sc["grid"] = [clear_time(g, times, frames) for g in experiment_grid(sc["start"], sc["end"])]
+                t = sc["grid"][0]
+            else:
+                t = typical_time(sc, times, frames)
             idx = min(range(len(times)), key=lambda k: abs(times[k] - t)) if times else 0
             hsh = dhash(frames[idx]) if frames else 0
             same = None if mode == "experiment" else next(
@@ -388,19 +457,18 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
                 sc["frame"] = scenes_all[same]["frame"]
                 sc["ocr"] = scenes_all[same]["ocr"]
             else:
-                jpg = media.extract_frame(path, t, out_dir / f"scene_{i:04d}.jpg", max_width=2400, region=region,
-                                          min_width=frame_width)
+                jpg = media.extract_frame(path, t, out_dir / f"scene_{i:04d}.jpg", region=region,
+                                          **frame_size(region, frame_width))
                 sc["frame"] = str(jpg)
                 sc["ocr"] = ocr_image(ocr, jpg) if mode != "experiment" else ""
-            if mode == "experiment":  # 区間の始めと終わりの画面も保存（変化の確認用）
-                extra = [round(sc["start"] + 0.5, 2), round(max(sc["start"], sc["end"] - 0.5), 2)]
-                evs = [{"time": x, "change": None} for x in extra if abs(x - t) > 1.0]
+            if mode == "experiment":  # 区間の後半の格子点の画面（前半は代表の画面）。画面の間隔は区間をまたいでも等しい
+                evs = [{"time": round(x, 2), "change": None} for x in sc.get("grid", [])[1:]]
             else:
                 evs = sorted(sc["events"], key=lambda e: -e["change"])[:max_events_per_scene]
             for e in sorted(evs, key=lambda e: e["time"]):
                 jpg = media.extract_frame(path, min(e["time"] + (0.5 if e["change"] else 0.0), s_end - 0.1),
                                           out_dir / f"scene_{i:04d}_ev_{int(e['time'] * 10):07d}.jpg",
-                                          max_width=2400, region=region, min_width=frame_width)
+                                          region=region, **frame_size(region, frame_width))
                 e["frame"] = str(jpg)
             sc["events_with_frames"] = [e for e in evs if e.get("frame")]
             sc["start"], sc["end"] = round(sc["start"], 2), round(sc["end"], 2)
