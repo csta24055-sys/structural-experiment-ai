@@ -614,6 +614,31 @@ def cmd_read(args) -> int:
     return 0 if not any(f.get("error") for f in summary["files"]) else 1
 
 
+def cmd_requirements(args) -> int:
+    """要求事項の台帳の照合（解析の完了時・Excel 作成時・レポート作成時）。"""
+    from . import requirements as R
+    cfg = load_config(args.config)
+    reading = [Path(x) for x in (args.reading or [])]
+    sem = Path(args.semantic) if args.semantic else None
+    out = Path(args.out)
+    if args.action == "checklist":
+        items = R.checklist(args.stage, sem, reading)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"checklist_{args.stage}.json").write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"{args.stage} の照合項目 {len(items)} 件 → {out / f'checklist_{args.stage}.json'}（evidence を埋めて verify に渡す）")
+        return 0
+    if args.stage == "analysis":
+        rows = R.verify_analysis(cfg, reading, Path(args.corpus) if args.corpus else None, sem)
+    else:
+        items = R.checklist(args.stage, sem, reading)
+        ev = json.loads(Path(args.evidence).read_text(encoding="utf-8")) if args.evidence else {}
+        rows = R.verify_stage(args.stage, items, ev)
+    counts = R.write(rows, out, args.stage)
+    print(f"要求事項の照合（{args.stage}）: " + "、".join(f"{k} {v}" for k, v in counts.items() if v))
+    print((out / f"ledger_{args.stage}.md").read_text(encoding="utf-8")[:6000])
+    return 0
+
+
 def cmd_connect_check(args) -> int:
     cfg = load_config(args.config)
     from .connect import run_connect_check
@@ -692,6 +717,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--list-targets", action="store_true", help="読み取る資料（重複を除く）の一覧を JSON で出す")
     p.add_argument("--count-tokens", action="store_true",
                    help="AI に送る依頼の入力トークンを API の count_tokens で数える（推論しないので課金なし）")
+    p = sub.add_parser("requirements", help="要求事項の台帳（利用者の指示＋資料の要求事項＋未確認事項）の照合")
+    p.add_argument("action", choices=["verify", "checklist"])
+    p.add_argument("--stage", choices=["analysis", "excel", "report"], default="analysis")
+    p.add_argument("--reading", nargs="*", help="読み取り結果のフォルダ（reading.json を含む）")
+    p.add_argument("--corpus", help="資料横断の結果（materials.json など）")
+    p.add_argument("--semantic", help="意味理解の結果（semantic/directives.json を含むフォルダ）")
+    p.add_argument("--evidence", help="作成段階の確認記録（{項目ID: {status, where, note}}）")
+    p.add_argument("--out", required=True)
     p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")
     p.add_argument("--no-download", action="store_true", help="動画・PDF・Excel の見本の取得を省略")
     p.add_argument("--no-claude", action="store_true")
@@ -704,7 +737,8 @@ def main(argv: list[str] | None = None) -> int:
                 "style": cmd_style, "feedback": cmd_feedback, "trace": cmd_trace,
                 "checks": cmd_checks, "reverify": cmd_reverify, "check-draft": cmd_check_draft,
                 "estimate": cmd_estimate, "search": cmd_search, "show-directive": cmd_show_directive,
-                "dropbox-auth": cmd_dropbox_auth, "connect-check": cmd_connect_check, "read": cmd_read}[args.cmd](args)
+                "dropbox-auth": cmd_dropbox_auth, "connect-check": cmd_connect_check, "read": cmd_read,
+                "requirements": cmd_requirements}[args.cmd](args)
     except ConfigError as e:
         print(f"設定エラー: {e}", file=sys.stderr)
         return 2

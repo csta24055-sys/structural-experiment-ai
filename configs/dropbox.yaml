@@ -49,17 +49,19 @@ reading:
     - match: ["*/鋼材実験経過先生1/*"]
       kind: experiment
       who: 先生側の録画
-      window: 15
+      window: 15        # 15 秒ごとの区間。各区間で 3 枚（始め・代表・終わり）
       trim_end: true
       sequence: teacher
       order: 1
+      group: 4
     - match: ["*/鋼材実験経過先生2/*"]
       kind: experiment
       who: 先生側の録画
-      window: 15
+      window: 15        # 15 秒ごとの区間。各区間で 3 枚（始め・代表・終わり）
       trim_end: true
       sequence: teacher
       order: 2
+      group: 4
     # 生徒の撮影。表面・裏面を交互に撮影。先生側の末尾処理は適用しない
     - match: ["*/鋼材実験経過生徒*/*"]
       kind: experiment
@@ -67,6 +69,14 @@ reading:
       window: 15
       faces: true
       sequence: student
+      group: 4
+    # Excel・レポートの作り方（最終成果物の作成に必要な情報を落とさないよう細部まで読む）:
+    # 0.5 秒ごとに画面を見て変化した画面をすべて保存、資料の部分を 2 倍、代表画面の部分拡大、音声も合わせて読む、
+    # 文字起こしは精度の高い large-v3
+    - match: ["*/エクセルの作り方*/*", "*/レポートの作り方*/*"]
+      kind: lecture_detail
+      interval: 0.5
+      asr_model: large-v3
 
 ai:
   provider: anthropic

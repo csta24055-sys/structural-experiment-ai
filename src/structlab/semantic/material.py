@@ -38,6 +38,8 @@ class Scene:
     transcribed: bool | None = None   # 音声がある区間で文字起こしされたか（None: 音声なし）
     visual: bool | None = None        # 映像がある区間で画面を取得したか（None: 映像なし）
     needs_ai: list[str] = field(default_factory=list)
+    # 第3回の照合だけで見る画像（読み取り工程で AI が読み済みの画像を、第1回で重ねて送らないため）
+    verify_images: list[tuple[Path, str]] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -101,6 +103,7 @@ def build_scenes(db: DB, frow) -> list[Scene]:
                 sc.lines.append(Line(s, "document", page=sc.page))
             sc.material = rec.get("ai_text", "") or text
             sc.images = [(Path(p), lbl) for p, lbl in rec.get("images", []) if Path(p).exists()]
+        sc.verify_images = [(Path(p), lbl) for p, lbl in rec.get("verify_images", []) if Path(p).exists()]
         scenes.append(sc)
     return scenes
 

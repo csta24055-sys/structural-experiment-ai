@@ -25,7 +25,7 @@ from .inventory import as_dicts, build_inventory, inventory_markdown
 
 READ_KINDS = {"pdf", "video", "audio"}
 #: ローカルの読み取り方法を変えたら上げる（保存済みの読み取り結果を使い直さず、読み直すため）
-READ_VERSION = 5
+READ_VERSION = 6
 TERM = re.compile(r"[一-龥ァ-ヶー]{2,}")
 
 
@@ -137,10 +137,12 @@ class Reader:
                 rv = self.cfg.data.get("reading", {})
                 mkv = remux(Path(local), self.cfg.cache_dir / f"read_{_key(rf)}.mkv")
                 try:
+                    role = role_for(self.cfg, rf.path)
                     rec = read_video(mkv, d / "frames", ocr=ocr, transcriber=transcriber,
-                                     interval=float(rv.get("scene_interval_seconds", 1.0)),
+                                     interval=float(role.get("interval", rv.get("scene_interval_seconds", 1.0))),
                                      max_events_per_scene=int(rv.get("max_events_per_scene", 4)),
-                                     role=role_for(self.cfg, rf.path), meta_path=Path(local), log=self.log)
+                                     detail=role.get("kind") == "lecture_detail",
+                                     role=role, meta_path=Path(local), log=self.log)
                 finally:
                     if mkv != Path(local):
                         mkv.unlink(missing_ok=True)
@@ -300,6 +302,18 @@ class Reader:
             return run
         self._parallel([group_job(k, g) for k, g in enumerate(groups)])
 
+        def detail_job(sc):
+            def run():
+                reqs = ai_read.video_detail_requests(label, sc, fmt_time)
+                parts = [self._ai_cached(rec, f"scene_{sc['index']:04d}_d{k}", (lambda r=r: r))
+                         for k, r in enumerate(reqs)]
+                sc["ai"] = ai_read.merge_detail(parts) if all(x is not None for x in parts) or not self.batch else None
+                sc["ai_model"] = "main"
+            return run
+        if role.get("kind") == "lecture_detail":
+            self._parallel([detail_job(sc) for sc in uniq if sc.get("mode") != "experiment"])
+            uniq = []
+
         def scene_job(sc):
             def run():
                 if sc.get("mode") == "experiment":
@@ -407,8 +421,11 @@ def run_reading(cfg, *, only: list[str] | None = None, allow_ai: bool = False, p
     targets.sort(key=lambda i: (i.kind != "pdf", i.size))
     records: dict[str, dict] = {}
     for it in targets:
-        if it.kind != "pdf" and transcriber is None:
-            transcriber = _make_transcriber(cfg, [r for r in records.values() if r["kind"] == "pdf"], log)
+        want = role_for(cfg, it.path).get("asr_model") or cfg.data["transcription"].get("model")
+        if it.kind != "pdf" and (transcriber is None or getattr(transcriber, "_role_model", want) != want):
+            transcriber = _make_transcriber(cfg, [r for r in records.values() if r["kind"] == "pdf"], log, model=want)
+            if transcriber is not None:
+                transcriber._role_model = want
         try:
             records[it.path] = reader.local_read(source, by_path[it.path], it.kind, transcriber)
         except Exception as e:  # noqa: BLE001
@@ -462,7 +479,12 @@ def all_requests(rec: dict, vocab: str = "") -> list:
                                                  role.get("who", "")) for k, g in enumerate(groups)]
     else:
         reqs = [ai_read.experiment_window_request(label, sc, fmt_time, ref, role.get("who", "")) for sc in exp]
-    reqs += [ai_read.video_scene_request(label, sc, fmt_time) for sc in uniq if sc.get("mode") != "experiment"]
+    if role.get("kind") == "lecture_detail":
+        for sc in uniq:
+            if sc.get("mode") != "experiment":
+                reqs += ai_read.video_detail_requests(label, sc, fmt_time)
+    else:
+        reqs += [ai_read.video_scene_request(label, sc, fmt_time) for sc in uniq if sc.get("mode") != "experiment"]
     reqs += [ai_read.speech_fix_request(label, i, segs, vocab, fmt_time)
              for i, segs in ai_read.speech_chunks(rec.get("speech", []))]
     return reqs
@@ -506,9 +528,14 @@ def list_targets(cfg, source, with_hash: bool = False) -> list:
     return [{"path": i.path, "key": f"v{READ_VERSION}-{(i.content_hash or '')[:16]}"} for i in chosen]
 
 
-def _make_transcriber(cfg, pdf_records: list[dict], log):
+def _make_transcriber(cfg, pdf_records: list[dict], log, model: str | None = None):
+    """model: 資料の役割で指定した文字起こしのモデル（Excel・レポートの作り方は精度の高い large-v3）。"""
+    import copy
     from .. import media
     t = cfg.data["transcription"]
+    if model and model != t.get("model"):
+        cfg = copy.copy(cfg)
+        cfg.data = {**cfg.data, "transcription": {**t, "model": model}}
     try:
         tr = media.make_transcriber(cfg)
     except media.MediaError as e:

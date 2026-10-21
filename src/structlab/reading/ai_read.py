@@ -295,6 +295,9 @@ def experiment_groups(scenes: list[dict], size: int = EXPERIMENT_GROUP) -> list[
 #: 出力（思考を含む）の見込み。実測が無いので推測。区間をまとめた呼び出しは「まとめの分＋区間ごとの記録」
 EST_GROUP_OUTPUT_BASE = 1500
 EST_GROUP_OUTPUT_PER_WINDOW = 900
+#: Excel・レポートの作り方の細部の読み取り: 書き起こし＋音声の要点＋変化した画面ごとの操作
+EST_DETAIL_OUTPUT_BASE = 5000
+EST_DETAIL_OUTPUT_PER_FRAME = 350
 
 
 def image_tokens(path: str | Path, max_edge: int = 2576) -> int:
@@ -330,8 +333,18 @@ def plan_requests(rec: dict) -> list[tuple[str, int, int, str]]:
         kind = "experiment_window" if size == 1 else f"experiment_group{len(g)}"
         # 基準画像はキャッシュする（cached に別に数える）
         out.append((kind, sum(image_tokens(f) for f in imgs), text, f"exp{g[0]['index']}", ref_tok))
+    detail = (rec.get("role") or {}).get("kind") == "lecture_detail"
     for sc in uniq:
         if sc.get("mode") == "experiment":
+            continue
+        if detail:
+            chunks = detail_chunks(sc)
+            speech = min(8000, sum(len(x["text"]) + 12 for x in sc.get("speech", [])))
+            for k, evs in enumerate(chunks):
+                imgs = [sc["frame"]] + ([t["frame"] for t in sc.get("tiles", [])] if k == 0 else
+                                        [chunks[k - 1][-1]["frame"]]) + [e["frame"] for e in evs]
+                out.append((f"video_detail{len(evs)}", sum(image_tokens(f) for f in imgs),
+                            600 + speech + min(len(sc.get("ocr") or ""), 3000) // 2, f"scene{sc['index']}_{k}", 0))
             continue
         imgs = [sc["frame"]] + [e["frame"] for e in sc.get("events_with_frames", [])]
         kind = "video_ops" if sc.get("events_with_frames") else "video_scene"
@@ -355,6 +368,10 @@ def estimate_plan(records: dict[str, dict], *, system_tokens: int = 1800, price_
                 n = int(kind[len("experiment_group"):])
                 out = EST_GROUP_OUTPUT_BASE + EST_GROUP_OUTPUT_PER_WINDOW * n
                 kind = "experiment_group"
+            elif kind.startswith("video_detail"):
+                n = int(kind[len("video_detail"):])
+                out = EST_DETAIL_OUTPUT_BASE + EST_DETAIL_OUTPUT_PER_FRAME * n
+                kind = "video_detail"
             else:
                 out = EST_OUTPUT[kind]
             # キャッシュする先頭部分（指示文・基準画像）: 書き込み 1.25 倍・読み出し 0.05 倍。cache_hit は読み出しになる割合の仮定
@@ -373,3 +390,83 @@ def estimate_plan(records: dict[str, dict], *, system_tokens: int = 1800, price_
         for key in ("calls", "input_tokens", "output_tokens", "usd"):
             tot[key] += r[key]
     return {"files": rows, "total": tot, "batch": batch, "cache_hit": cache_hit}
+
+
+# ---------------- Excel・レポートの作り方の動画（細部まで読む） ----------------
+DETAIL_EVENTS_PER_CALL = 12
+
+DETAIL_SYSTEM = SYSTEM + """
+
+この動画は Excel の作り方・レポートの作り方の説明で、後で同じ Excel・レポートを作るために使います。細部まで正確に読んでください:
+- 「部分拡大」は代表画面の一部（左上・右上・左下・右下）を拡大したもの。小さな文字・セル・数式・目盛りは部分拡大で読む
+- 画面の変化は、短時間だけ表示された操作・ダイアログ・設定値・数式バーの内容も含めて、すべて operations に時刻付きで書く
+  （セル番地・入力した式・関数・書式・グラフの種類・軸・系列・近似曲線・ファイル名・シート名・メニューの項目など）
+- 音声の文字起こし（誤りを含む）を参考に、画面と対応づけて、説明・手順・指示・注意・理由を speech_points に時刻付きで書く。
+  音声の内容は言い換えず要点を正確に（数値・式・指示の強さを変えない）。発言者は特定しない（「音声」として書く）。
+  音声だけで画面に無いことは source=speech、画面と両方にあることは both
+- 画面に一瞬だけ表示された設定（ダイアログの値、書式の指定など）は settings_shown に時刻と値を書く
+- 読めない・聞き取れない箇所は推測せず unreadable に書く"""
+
+DETAIL_SCHEMA = {
+    **SCHEMA,
+    "required": SCHEMA["required"] + ["speech_points", "settings_shown"],
+    "properties": {
+        **SCHEMA["properties"],
+        "speech_points": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["time", "text", "source"],
+            "properties": {"time": _STR, "text": _STR,
+                           "source": {"type": "string", "enum": ["speech", "screen", "both"]}}}},
+        "settings_shown": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["time", "where", "value"],
+            "properties": {"time": _STR, "where": _STR, "value": _STR}}},
+    },
+}
+
+
+def detail_chunks(scene: dict, size: int = DETAIL_EVENTS_PER_CALL) -> list[list[dict]]:
+    evs = scene.get("events_with_frames", [])
+    return [evs[i:i + size] for i in range(0, len(evs), size)] or [[]]
+
+
+def video_detail_requests(file_label: str, scene: dict, fmt_time) -> list[AIRequest]:
+    """場面の代表画面・部分拡大・変化したすべての画面・音声を、画面の数が多ければ複数回に分けて読む。"""
+    chunks = detail_chunks(scene)
+    speech = "\n".join(f"[{fmt_time(x['start'])}] {x['text']}" for x in scene.get("speech", []))[:8000]
+    ocr = (scene.get("ocr") or "")[:3000]
+    out = []
+    for k, evs in enumerate(chunks):
+        imgs = [AIImage(Path(scene["frame"]), f"{fmt_time(scene['frame_time'])} の画面（場面の代表）")]
+        if k == 0:
+            imgs += [AIImage(Path(t["frame"]), f"代表画面の部分拡大（{t['label']}）") for t in scene.get("tiles", [])]
+        else:
+            prev = chunks[k - 1][-1]
+            imgs.append(AIImage(Path(prev["frame"]), f"{fmt_time(prev['time'])} の画面（前の部分の最後・比較用）"))
+        imgs += [AIImage(Path(e["frame"]), f"{fmt_time(e['time'])} の画面（変化）") for e in evs]
+        part = f"（{k + 1}/{len(chunks)} 部分目: {fmt_time(evs[0]['time'])}–{fmt_time(evs[-1]['time'])} の変化）" \
+            if len(chunks) > 1 and evs else ""
+        text = (f"# 資料: {file_label} の動画 {fmt_time(scene['start'])}–{fmt_time(scene['end'])} の場面{part}\n"
+                f"## 参考: OCR（誤りを含む）\n{ocr or '（なし）'}\n\n"
+                f"## 参考: この場面の音声の文字起こし（誤りを含む）\n{speech or '（音声なし）'}\n\n"
+                + ("この部分では、比較用の画面の後に続く変化を読んでください（代表画面の内容は別の部分で書き起こし済み）。\n" if k else "")
+                + "指示どおりに、画面と音声を細部まで書き起こしてください。")
+        out.append(AIRequest(task="read_video_detail", source_label=f"{file_label} {fmt_time(scene['start'])} #{k}",
+                             text=text, images=imgs, t_start=scene["start"], t_end=scene["end"],
+                             system=DETAIL_SYSTEM, schema=DETAIL_SCHEMA, max_tokens=32000))
+    return out
+
+
+def merge_detail(parts: list[dict | None]) -> dict | None:
+    """分けて読んだ結果を1つの場面の結果にまとめる（どれかが欠けていれば notes に書く）。"""
+    got = [x for x in parts if x]
+    if not got:
+        return None
+    out = {k: ([] if isinstance(v, list) else v) for k, v in got[0].items()}
+    for x in got:
+        for k, v in x.items():
+            if isinstance(v, list):
+                out.setdefault(k, []).extend(v)
+    out["notes"] = " / ".join(x.get("notes", "") for x in got if x.get("notes"))
+    if len(got) < len(parts):
+        out["notes"] += f" / {len(parts) - len(got)} 部分の読み取りが未完了"
+        out.setdefault("unreadable", []).append({"where": "場面の一部", "reason": "AI の読み取りが未完了"})
+    return out

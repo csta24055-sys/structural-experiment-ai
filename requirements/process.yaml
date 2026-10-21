@@ -1,0 +1,220 @@
+# 利用者（本人）がこれまでに出した指示から抽出した、本番解析・提出物作成に適用する要求事項の台帳。
+# 資料の内容（先生の指示）は含めない（それは解析結果として work/ に出力され、コミットしない）。
+#
+# 方針
+# - 指示は削除しない。後の指示で訂正・置き換えられたものは status: superseded とし superseded_by で結ぶ
+# - 矛盾・緊張関係は conflicts に双方を記録し、勝手にどちらかを捨てない（resolution に判断と根拠、未決なら unresolved）
+# - stage: どの工程で守る・確かめるか（reading 読み取り / semantic 意味理解・指示抽出 / integration 資料横断 /
+#   excel・report 提出物の作成（将来）/ style 文章調整 / feedback 教授の指摘 / operations 運用 / security 安全 / cost 費用 / dev 開発の進め方）
+# - verify: 確認方法。check:<ID> は src/structlab/checks/catalog.py のチェック、auto:<名前> は structlab requirements verify の自動確認、
+#   manual は人が確認（自動で確かめられないものを確認済みにしない）
+# - source: msg は会話の何番目の利用者メッセージか（0 始まり）と時刻（UTC）。CLAUDE.md はリポジトリの作業指示
+sources:
+  M0: {ts: "2026-10-20T01:40:50Z", title: 自動解析システムの作成（基本設計）}
+  M1: {ts: "2026-10-20T02:26:26Z", title: 局所・全体の意味理解と指示の網羅的抽出}
+  M2: {ts: "2026-10-20T03:49:53Z", title: 既存システムの保護・チェック機能・文章スタイル}
+  M3: {ts: "2026-10-20T04:28:12Z", title: チェック設計方針の訂正}
+  M4: {ts: "2026-10-20T05:52:53Z", title: Dropbox・Claude API 連携}
+  M5: {ts: "2026-10-20T06:25:07Z", title: Dropbox 権限設定の報告と案内依頼}
+  M6: {ts: "2026-10-20T07:08:03Z", title: Dropbox 連携を最短で完了}
+  M7: {ts: "2026-10-20T07:23:15Z", title: 認証診断の実行}
+  M8: {ts: "2026-10-20T07:29:34Z", title: refresh token を Secrets に保存する仕組み}
+  M9: {ts: "2026-10-20T08:28:16Z", title: preflight 実行}
+  M10: {ts: "2026-10-20T08:45:43Z", title: exchange 実行}
+  M11: {ts: "2026-10-20T08:52:31Z", title: 資料の正確な読み取りを優先}
+  M12: {ts: "2026-10-20T09:48:38Z", title: 読み取り基盤の最終確認}
+  M13: {ts: "2026-10-20T09:52:09Z", title: 今後の3段階}
+  M14: {ts: "2026-10-20T14:27:09Z", title: .url（Box リンク）の確認}
+  M15: {ts: "2026-10-21T04:51:27Z", title: 本番解析の最終指示（修正版）}
+  M16: {ts: "2026-10-21T05:28:23Z", title: 補足5点・重複の説明・最初からやり直し（モデルのみ変更）}
+  M17: {ts: "2026-10-21T09:17:26Z", title: 予算ごとの比較}
+  M18: {ts: "2026-10-21T09:31:02Z", title: 3,800円の見積もりの最適化}
+  M19: {ts: "2026-10-21T10:59:53Z", title: 品質を一切落とさない費用削減}
+  M20: {ts: "2026-10-21T11:48:26Z", title: 2,350円構成＋Excel・レポート動画の精度向上＋要求事項の管理}
+  CLAUDE: {ts: "repository", title: CLAUDE.md（作業指示）}
+
+requirements:
+# ---------------- 対象資料・取得 ----------------
+- {id: P001, src: [M15], stage: [reading], kind: 必須, verify: auto:all_materials_listed,
+   text: "「鋼材実験レポート用」の11フォルダを再走査し、含まれる資料をすべて確認する。今回のフォルダ構成を正式な解析対象とする（過去に解析した資料も含む）"}
+- {id: P002, src: [M15], stage: [reading], kind: 禁止, verify: auto:no_unconfirmed_exclusion,
+   text: "同じ資料・似た資料があっても、確認せずに解析対象から除外しない"}
+- {id: P003, src: [M15], stage: [reading], kind: 条件付き, verify: "auto:duplicates_recorded; check:A6",
+   text: "完全に同一と確認できたファイルは解析結果を再利用してよい。ただし別資料としての存在を記録する"}
+- {id: P004, src: [M15], stage: [reading, integration], kind: 必須, verify: auto:similar_differences_recorded,
+   text: "資料同士に違いがある場合は、その違いを確認する"}
+- {id: P005, src: [M0], stage: [reading], kind: 必須, verify: "check:A1; check:A2",
+   text: "指定フォルダ以下を再帰的に取得し、構造・名前・容量・更新日時・形式を記録。新規アップロードを後から検出し、アップロード途中のファイルを解析しない"}
+- {id: P006, src: [M0], stage: [reading], kind: 必須, verify: manual,
+   text: "大容量ファイルをメモリに一括で読み込まず、ファイル・ページ・時間区間の単位で逐次処理する"}
+- {id: P007, src: [M0], stage: [reading], kind: 必須, verify: "check:A7; check:A8",
+   text: "ZIP は安全に展開し（ZIP 爆弾・危険なパスに対処）、内部を順に処理する。サイズ・ディスク・API 使用量の上限を設定可能にする"}
+- {id: P008, src: [M14], stage: [reading], kind: 必須, verify: manual,
+   text: "Dropbox 直下の .url（Box の Excel 操作解説動画のリンク）は、アクセス・取得できるかを確認した。取得できない場合は原因（ログイン・ダウンロード制限・リンク）を切り分けて報告する（2026-10-20: Box は can_download:false、回避しない）"}
+
+# ---------------- 読み取りの精度 ----------------
+- {id: P010, src: [M15, M11], stage: [reading], kind: 必須, verify: "auto:ai_read_complete; check:B14",
+   text: "無料の OCR・文字起こしだけで完了扱いにせず、映像・図表・計算式・説明内容まで高精度に読み取る（有料 AI を必要な部分すべてに使用してよい）"}
+- {id: P011, src: [M11, M0], stage: [reading], kind: 必須, verify: "auto:ai_read_complete; check:B2",
+   text: "動画は音声だけでなく画面内の文字・数式・操作内容も対象。PDF は文章・図表・数式・表を正確に読み取る（ページ単位、取りこぼさない）"}
+- {id: P012, src: [M11, M12], stage: [reading], kind: 必須, verify: auto:verification_recorded,
+   text: "取得・分割できただけで完了と判断せず、内容の抽出と照合まで確認する"}
+- {id: P013, src: [M0], stage: [reading], kind: 必須, verify: "check:B3; check:B4",
+   text: "動画の音声を文字起こしし、映像を時間区間ごとに解析し、音声と映像をタイムスタンプで対応付ける。重要な場面は必要に応じて追加解析する"}
+- {id: P014, src: [M0], stage: [reading], kind: 必須, verify: manual,
+   text: "動画から Excel の操作・画面内の文字・計算式・グラフ・先生の指示を抽出する"}
+- {id: P015, src: [M15], stage: [reading], kind: 必須, verify: auto:orientation_handled,
+   text: "Excel 操作動画の画面回転、音声欠落、レポート説明動画の通知混入など、以前確認された問題を解消する"}
+- {id: P016, src: [M15, M0], stage: [reading], kind: 禁止, verify: auto:no_speech_without_audio,
+   text: "元動画に音声が存在しない部分の文字起こしを捏造しない。映像から確認できる内容のみ解析する（読み取れない情報を推測で補完しない）"}
+- {id: P017, src: [M20], stage: [reading], kind: 必須, verify: auto:lecture_detail_applied,
+   text: "「エクセルの作り方」「レポートの作り方」は、最終成果物の作成時に必要な情報が不足しないよう、解像度・フレーム抽出密度・部分拡大などを必要な限り高める。先生の音声による説明や短時間だけ表示される操作・設定も対象"}
+- {id: P018, src: [M15, M14], stage: [reading], kind: 必須, verify: auto:per_material_outputs,
+   text: "資料ごとに、読み取った内容、重要な数値・式・指示、画像・映像の時刻、解析の確実性、不明点を記録する"}
+
+# ---------------- 先生の実験経過動画・生徒の動画 ----------------
+- {id: P020, src: [M15, M16], stage: [reading, integration], kind: 必須, verify: auto:teacher_sequence,
+   text: "1→2 の順で続く実験経過動画は「鋼材実験経過先生1」「鋼材実験経過先生2」の2本だけ"}
+- {id: P021, src: [M15, M16], stage: [reading], kind: 必須, verify: auto:teacher_trim,
+   text: "先生1・2とも、実験映像の再生後に録画の冒頭画面へ戻った時点以降（完全に無音）を解析対象から完全に除外し破棄する（画像抽出・OCR・文字起こし・有料 AI を行わない）"}
+- {id: P022, src: [M15], stage: [reading], kind: 禁止, verify: auto:teacher_trim,
+   text: "冒頭画面に戻った部分を新しい実験の開始として扱わない"}
+- {id: P023, src: [M15], stage: [reading], kind: 必須, verify: auto:teacher_trim,
+   text: "無音だけで判断せず、映像が冒頭に戻ったことも確認する。除外開始時刻と判断根拠を記録する。判断できない場合は推測で削除せず確認する"}
+- {id: P024, src: [M15, M16], stage: [integration], kind: 必須, verify: auto:teacher_timeline,
+   text: "先生1の有効区間→先生2の有効区間の順につなぎ、一続きの実験経過として整理・保存する"}
+- {id: P025, src: [M15], stage: [integration], kind: 禁止, verify: auto:teacher_timeline,
+   text: "録画されていない時間を勝手に補完しない"}
+- {id: P026, src: [M15, M16], stage: [reading, integration], kind: 必須, verify: auto:student_faces,
+   text: "生徒の動画は表面と裏面を行き来して撮影、先生の動画は表面だけ。両者とも最初は同じ表面。生徒の動画で表面・裏面の切り替わりを識別し、先生の動画で表面の変化を確認する"}
+- {id: P027, src: [M15], stage: [reading], kind: 禁止, verify: auto:student_not_duplicate,
+   text: "先生と生徒の動画を、冒頭が似ていても重複動画として除外しない"}
+- {id: P028, src: [M15], stage: [integration], kind: 禁止, verify: auto:correspondence_method,
+   text: "先生と生徒の撮影時刻を根拠なく一致させない。実験操作や試験体の変化から対応関係を判断する"}
+- {id: P029, src: [M15, M16], stage: [reading, integration], kind: 禁止, verify: auto:student_rules,
+   text: "生徒の動画を番号だけを理由に時間的に連結しない。先生1・2の連結・末尾除外ルールを生徒の動画に自動適用しない"}
+- {id: P030, src: [M15], stage: [reading], kind: 禁止, verify: auto:no_number_continuity,
+   text: "先生の実験経過動画以外の「1・2」を番号だけで時間的に連続していると判断しない。それぞれの内容を確認して解析する"}
+- {id: P031, src: [M15], stage: [integration], kind: 必須, verify: auto:student_outputs,
+   text: "生徒の動画について、表面・裏面の観察結果と先生の動画との対応関係を保存する"}
+
+# ---------------- 意味理解・指示の抽出（M1・M2 の要件は本番でも有効） ----------------
+- {id: P040, src: [M1], stage: [semantic], kind: 必須, verify: "check:C1; check:C2; check:C3",
+   text: "場面ごとに、何を話しているか・何が表示されているか・何の操作/実験か・その意味・理由・前後との関係・誰への指示か・何の作業か・どの提出物に関係するかを、音声と映像を統合して理解する（文字起こし・OCR・画像説明の羅列を意味理解の完了とみなさない）"}
+- {id: P041, src: [M1], stage: [semantic], kind: 必須, verify: "check:C5; check:C11",
+   text: "動画全体のテーマ・目的・流れ・論理構造・各場面の役割・作業順序・依存関係・結論・重要事項・訂正・補足・例外・条件変更・繰り返し強調・矛盾の整合・最終要件・学生に理解/実行してほしいことを把握する（動画を見ていない人に説明できる水準）"}
+- {id: P042, src: [M1], stage: [semantic], kind: 必須, verify: "check:C8; check:C10",
+   text: "局所理解と全体理解を繰り返し照合し再解釈する。前半の説明が後半で訂正された場合、前半だけを最終指示として扱わない。解消できない矛盾は勝手に決めず未解決として記録"}
+- {id: P043, src: [M1, M2], stage: [semantic], kind: 必須, verify: "check:D1; check:D7",
+   text: "指示を A禁止・B非推奨・C必須・D要望・E推奨・F任意・G条件付き・H その他/判断不能 の8分類で可能な限り漏れなく抽出（8分類を維持）"}
+- {id: P044, src: [M1], stage: [semantic], kind: 禁止, verify: "check:D1; check:D8",
+   text: "AI の推測で指示の強さを変えない（禁止→推奨、推奨→必須などにしない）。明示された内容と AI の推論を必ず区別する。判断が難しいものは要確認として保存"}
+- {id: P045, src: [M1], stage: [semantic], kind: 必須, verify: "check:D2; check:D3; check:D4; check:D6",
+   text: "各指示に16項目（内容・分類・対象作業・適用条件・動画名・開始/終了時刻・関連画面・操作・発言・前後の文脈・確実性・未確認事項・明示/推論・関連指示・訂正等との関係）を記録し、元の時刻に戻って検証できるようにする"}
+- {id: P046, src: [M1, M2], stage: [semantic], kind: 必須, verify: "check:O2; check:D9",
+   text: "3段階（第1回 全体理解、第2回 指示の重点抽出、第3回 元動画との照合と見落とし検証）を維持する。曖昧な重要指示は該当箇所の映像と音声を再解析し、必要なら範囲を広げる"}
+- {id: P047, src: [M1], stage: [semantic], kind: 禁止, verify: check:O2,
+   text: "「全区間を処理した」と「すべての指示を理解できた」を混同しない。網羅率は処理済み時間に基づき、指示の検出率に根拠のない数値を出さない"}
+- {id: P048, src: [M2, CLAUDE], stage: [semantic], kind: 禁止, verify: check:D5,
+   text: "発言者が不明な場合は先生の指示と断定しない（話者識別はしていない。利用者が確認した場合のみ semantic.video_speaker: teacher）"}
+- {id: P049, src: [M1], stage: [integration], kind: 必須, verify: "check:E3; check:E4; check:E5; check:E6",
+   text: "複数の動画・PDF・Excel・レポート作成説明・事前説明を横断して、目的・手順・データ処理・Excel/レポートの作り方・作業順序・依存関係・提出物と要件・共通指示・補足・訂正・矛盾を理解。資料間の矛盾は双方の根拠とともに報告し、勝手に採用しない。動画全体の理解と実験全体の理解を区別して保存"}
+- {id: P050, src: [M1], stage: [semantic, integration], kind: 必須, verify: auto:semantic_outputs,
+   text: "出力: 場面ごとの意味解析・動画全体の理解・説明内容と手順・指示一覧・分類/条件/根拠・統合要件・実験全体の理解・未確認事項・矛盾・訂正/補足/例外・失敗箇所・網羅率と検証状況。後から指示を検索し元の時刻・資料を確認できる"}
+- {id: P051, src: [M0], stage: [semantic], kind: 必須, verify: auto:semantic_outputs,
+   text: "解析結果を 目的・概要／実験手順／測定データ／Excel 作成方法／レポート作成方法／計算式・グラフ／提出物の要件／先生の指示／注意事項・禁止事項／不明点・矛盾 に分類する"}
+- {id: P052, src: [M0, M2], stage: [semantic], kind: 必須, verify: "check:D8; check:H1",
+   text: "先生の指示と AI 自身の推測を区別し、AI の解析結果を無条件に信用しない（最初の結論を正解として扱わず、独立に再確認できる）"}
+
+# ---------------- チェック・検証 ----------------
+- {id: P060, src: [M2, M3], stage: [reading, semantic, integration, excel, report], kind: 必須, verify: auto:check_catalog,
+   text: "システム全体で必要なチェックを網羅的に設計し最適な工程に組み込む（M3 で訂正: 不足分だけでなく全体を設計）。結果は 成功・不一致・要確認・未検証 を区別して記録"}
+- {id: P061, src: [M2], stage: [excel, report], kind: 必須, verify: "check:F1; check:F2; check:F3; check:F7; check:F11",
+   text: "Excel・レポート作成時に、計算の再現性・数式・単位・グラフ・考察・教授の指示・提出条件との一致を確認する"}
+- {id: P062, src: [M2], stage: [reading, semantic, excel], kind: 必須, verify: "check:H1; check:H2",
+   text: "独立した再検証: 重要な数値や数式はプログラムで再計算、不一致・曖昧な箇所を優先的に再解析、修正前後と理由を保存、検証不能なものを検証済みとしない（同じ処理の無意味な重複はしない）"}
+- {id: P063, src: [M20], stage: [reading, semantic, integration], kind: 必須, verify: auto:requirements_ledger,
+   text: "過去の指示と先生の要求事項（禁止・必須・数式・計算方法・Excel の作り方・グラフ・レポートの書式・記入内容・手順・例外・注意事項など、例示以外も含む）を漏れなく抽出し、何を守るか・根拠（資料・動画・時刻・過去の指示）・適用/検証の場所を記録して確認可能に管理する"}
+- {id: P064, src: [M20], stage: [integration], kind: 必須, verify: auto:requirements_verified_at_analysis,
+   text: "本番解析の完了時点で、過去の指示と先生の要求事項がすべて解析結果に反映されているかを項目ごとに照合する"}
+- {id: P065, src: [M20], stage: [excel, report], kind: 必須, verify: auto:requirements_recheck_mechanism,
+   text: "Excel・レポートを実際に作成する段階でも、同じ要求事項を再照合できる仕組みにする"}
+- {id: P066, src: [M20, M0], stage: [reading, semantic, integration, excel, report], kind: 禁止, verify: auto:unconfirmed_marked,
+   text: "不明点や判読できない箇所を確認できたものとして処理しない。未確認事項として明示する"}
+- {id: P067, src: [M20, M1], stage: [semantic, integration], kind: 禁止, verify: auto:conflicts_kept,
+   text: "過去の指示や資料に矛盾がある場合も、勝手に一方を破棄しない"}
+- {id: P068, src: [M0, M1], stage: [dev], kind: 必須, verify: manual,
+   text: "実際に検証していない機能は「未検証」と明示する。実装済み・テスト済み・実資料での検証待ちを区別して報告する"}
+
+# ---------------- 成果物・文章スタイル・フィードバック ----------------
+- {id: P070, src: [M15, M11, M0, CLAUDE], stage: [excel, report], kind: 禁止, verify: manual,
+   text: "今は Excel 計算・グラフ・実験報告書の作成（実装も）に進まない。読み取り工程を完成させることが目的",
+   note: "M13 で将来の第3段階（Excel 計算・報告書作成）は設計を提示し本人の確認後に実装すると指示あり。現時点では未着手"}
+- {id: P071, src: [M15], stage: [integration], kind: 必須, verify: auto:per_material_outputs,
+   text: "解析結果は後続の Excel 計算・グラフ作成・実験報告書作成に直接利用できる形で保存する"}
+- {id: P072, src: [M2, M3, CLAUDE], stage: [style], kind: 必須, verify: "check:G1; check:G2; check:G3; check:G4",
+   text: "本人の文章スタイル PDF は、内容・構成・計算・考察が確定した後の文章表現の調整だけに使う（解析・指示判断・計算・Excel・評価には使わない）。数値・数式・結果・根拠・指示・論理・結論を変えず、創作しない。適用前を保存し、適用後に内容が変わっていないか再検証。オン/オフ可能"}
+- {id: P073, src: [M2, CLAUDE], stage: [feedback], kind: 必須, verify: manual,
+   text: "教授のフィードバックは受け取ったまま記録し、原因の工程（読み取り・意味理解・指示抽出・計算・文章生成）を確認できるようにする。受け取る前に内容を推測して実装しない"}
+- {id: P074, src: [M13], stage: [excel, report], kind: 必須, verify: manual,
+   text: "第3段階（Excel 計算・報告書作成・照合・エラー検出・テスト・Actions 実行）は設計を提示して本人の確認を受けてから実装する。コードを省略したり仮の処理を完成品として扱わない。仕様が不足する箇所は明示し、勝手に仕様を確定しない"}
+
+# ---------------- 有料 AI・費用 ----------------
+- {id: P080, src: [M4, M1, M13, M17, M18, M19, M20], stage: [cost], kind: 禁止, verify: auto:no_paid_run_without_approval,
+   text: "有料 AI による本番解析は、本人が予算を承認するまで開始しない（課金前に概算費用を提示して承認を得る）"}
+- {id: P081, src: [M16], stage: [cost], kind: 必須, verify: auto:model_top,
+   text: "すべての解析に現在利用可能な最上位モデルを使う（Fable 5.1 は利用できないため。通常と難しい箇所でモデルを分けない）",
+   supersedes: [P082]}
+- {id: P082, src: [M15], stage: [cost], kind: 必須, status: superseded, superseded_by: P081, verify: manual,
+   text: "通常は高性能モデル、複雑な箇所には上位モデルを使う（M16 でモデルの指定だけ変更）"}
+- {id: P083, src: [M15], stage: [cost], kind: 必須, verify: manual,
+   text: "API の実行前に使用モデルと費用見積もりを報告する。追加クレジット購入や想定を大幅に超える費用が必要な場合は事前に確認する。同じ解析を無意味に繰り返さない"}
+- {id: P084, src: [M19], stage: [cost], kind: 禁止, verify: manual,
+   text: "費用削減のために、必要な解析の省略・重要な情報の見落とし・解析の深さ/正確性/検証能力の低下を一切認めない。品質維持を確認できない削減策は採用しない。両立できない場合は品質を優先"}
+- {id: P085, src: [M20], stage: [cost, reading], kind: 必須, verify: auto:config_2350,
+   text: "費用構成は約2,350円の最適化構成（Batch API・キャッシュ・動画プレーヤー内の切り出し・実験区間のまとめ読み等）を基本とし、実験動画は15秒あたり3枚に戻す。変更後の総額を再見積もりする",
+   conflicts: [{with: P084, note: "2,350円構成のうち「実験区間を4つずつまとめて読む」「切り出しを元の解像度で送る」は、品質が同等であることを有料の比較でまだ確認していない（M19 の基準では不採用の扱い）", resolution: unresolved}]}
+- {id: P086, src: [M17], stage: [cost], kind: 必須, verify: manual,
+   text: "品質の数値を示す場合は推測と実測を区別する"}
+- {id: P087, src: [M16], stage: [reading], kind: 必須, verify: manual,
+   text: "本番解析を「最終指示（修正版）」に従って最初からすべてやり直す（モデル以外の方法・対象・条件・成果物は従来どおり）",
+   supersedes_partly: [{id: P088, note: "最初からやり直す指示が後"}]}
+- {id: P088, src: [M16], stage: [reading], kind: 必須, status: superseded, superseded_by: P087, verify: manual,
+   text: "正常に処理済みの部分は不要に再解析しない（M16 の後半で最初からやり直しを指示）"}
+
+# ---------------- 安全・秘密情報・Dropbox ----------------
+- {id: P090, src: [M15, M11, M0, M4, CLAUDE], stage: [security], kind: 禁止, verify: check:O5,
+   text: "Dropbox には書き込まない。元資料フォルダ（/鋼材実験レポート用）は読み取り専用で扱う"}
+- {id: P091, src: [M4, M6, CLAUDE], stage: [security], kind: 禁止, verify: check:O6,
+   text: "API キー・アクセストークン・リフレッシュトークン・認証コードをチャット・ログ・コード・コミットに表示・保存しない。値を cat などで表示しない"}
+- {id: P092, src: [M6], stage: [security], kind: 必須, verify: manual,
+   text: "既に露出した認証情報は再利用せず、安全なものに更新する"}
+- {id: P093, src: [M0, M2, CLAUDE], stage: [security], kind: 禁止, verify: check:O7,
+   text: "実際の資料・解析結果（work/）・config.yaml・.env・文章スタイル PDF・style/profile.json を GitHub にコミットしない（コード・設定例・個人情報を含まないサンプルだけ）"}
+- {id: P094, src: [M0], stage: [security], kind: 必須, verify: check:O4,
+   text: "外部 AI サービスへのデータ送信は明示的な許可がある場合のみ行う"}
+- {id: P095, src: [M5, CLAUDE], stage: [operations], kind: 必須, verify: manual,
+   text: "秘密情報をチャットに貼らせない。本人の操作が必要な場合は iPhone で1手順ずつ案内する（GitHub Secrets／クラウド環境の環境変数に登録してもらう）"}
+- {id: P096, src: [M4], stage: [security], kind: 必須, verify: manual,
+   text: "最初は Dropbox の読み取り専用権限を使う。現在の実行環境と GitHub Actions で実現可能な方式を区別する"}
+- {id: P097, src: [M15], stage: [reading], kind: 必須, verify: auto:notifications_excluded,
+   text: "（通知の混入の解消）スマホの通知・他のアプリの表示は書き起こさない（個人の情報）"}
+
+- {id: P098, src: [M8, M9, M10, M6], stage: [operations], kind: 必須, verify: manual,
+   text: "Dropbox は今後も自動解析できる状態にする（refresh token を GitHub Secrets に保存。認証コードの取得を何度もやり直す設計にしない。2026-10-20 に preflight→exchange→DROPBOX_REFRESH_TOKEN 登録・接続確認済み）"}
+- {id: P099, src: [M7], stage: [operations], kind: 禁止, verify: manual,
+   text: "既存の iPhone ショートカットは使わない。本人に求める操作は、本人の認可・Secret の登録など代行できないものだけにする"}
+
+# ---------------- 運用・開発 ----------------
+- {id: P100, src: [M0], stage: [operations], kind: 必須, verify: "check:O8",
+   text: "処理状況を管理し、途中停止から続きを再開できる。同じファイルを無駄に再解析せず、更新されたら再解析する。失敗箇所を記録し再試行できる"}
+- {id: P101, src: [M0], stage: [operations], kind: 必須, verify: manual,
+   text: "iPhone から操作する前提。iPhone 自体で長時間の解析をしない。資料がそろった後、最小限の操作で解析を開始できる"}
+- {id: P102, src: [M2, M1], stage: [dev], kind: 禁止, verify: manual,
+   text: "既存システムを壊さない（解析機能の削除・置換をしない、テストを弱めて成功扱いにしない、互換性を保つ）。既存実装を最大限再利用する"}
+- {id: P103, src: [M0], stage: [operations], kind: 必須, verify: manual,
+   text: "利用する AI モデル・API を交換可能な設計にする"}
+- {id: P104, src: [M12], stage: [dev], kind: 必須, verify: manual,
+   text: "確認できなかった項目や既知の精度上の限界はそのまま報告する（すべて成功したことにしない）"}
+- {id: P105, src: [CLAUDE], stage: [operations], kind: 必須, verify: manual,
+   text: "解析結果の網羅率は「処理した時間の割合」であり「指示を漏れなく理解できた割合」ではないことを伝える。「未検証」は成功ではないと伝える"}

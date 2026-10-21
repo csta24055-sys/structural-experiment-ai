@@ -264,19 +264,72 @@ def typical_time(sc: dict, times: list[float], frames: list[np.ndarray]) -> floa
     return float(times[idx[int(np.argmin(cost))]])
 
 
-#: 画面の保存サイズ: 資料の部分の長辺を FRAME_EDGE にそろえる（切り出しが小さければ拡大、大きければ縮小）。
-#: 従来も「切り出し→長辺 1800 に拡大→AI に送る前に長辺 1568 に縮小」だったので、資料が AI に見える大きさは従来と同じ。
-#: 拡大は情報を増やさないが、AI は拡大した画像の方が細部を読みやすいことがあるため、従来より小さくはしない
-FRAME_EDGE = 1568
-FRAME_MIN_EDGE = FRAME_EDGE
+#: 画面の保存サイズ（資料の部分の長辺）。AI に送れる最大は 2576
+#: native: 切り出した資料は元の解像度（長辺が FRAME_MIN_EDGE 未満なら拡大）、画面全体（カメラ映像）は長辺 1568
+#: detail: Excel・レポートの作り方の動画。資料の部分を元の 2 倍（最大 2576）にして小さな文字・セルを読みやすくする
+FRAME_MIN_EDGE = 1000
+FRAME_FULL_EDGE = 1568
+FRAME_MAX_EDGE = 2576
+DETAIL_SCALE = 2.0
+TILE_SCALE = 3.0      # 部分拡大（2×2 に分けた各部分を元の 3 倍）
+TILE_OVERLAP = 0.1    # 部分拡大の重なり（境目の文字が切れないように）
 
 
-def frame_size(region: media.Region, edge: int = FRAME_EDGE) -> dict:
-    """extract_frame に渡す幅（資料の部分の長辺が edge になる幅）。"""
+def frame_size(region: media.Region, mode: str = "native", min_edge: int = FRAME_MIN_EDGE) -> dict:
+    """extract_frame に渡す幅（資料の部分の長辺が規則どおりになる幅）。"""
     w, h = region.w, region.h
+    long_edge = max(w, h)
+    if mode == "detail":
+        edge = min(FRAME_MAX_EDGE, int(long_edge * DETAIL_SCALE))
+    elif region.is_full:
+        edge = min(FRAME_FULL_EDGE, long_edge)
+    else:
+        edge = min(FRAME_MAX_EDGE, max(min_edge, long_edge))
     width = edge if w >= h else int(edge * w / h)
     width -= width % 2
     return {"max_width": max(width, 2), "min_width": width if width > w else 0}
+
+
+def tile_regions(region: media.Region) -> list[media.Region]:
+    """資料の部分を 2×2 に分けた部分拡大用の範囲（少し重ねる）。"""
+    out = []
+    tw, th = int(region.w * (0.5 + TILE_OVERLAP / 2)), int(region.h * (0.5 + TILE_OVERLAP / 2))
+    tw -= tw % 2
+    th -= th % 2
+    for ky in (0, 1):
+        for kx in (0, 1):
+            x = region.x + (0 if kx == 0 else region.w - tw)
+            y = region.y + (0 if ky == 0 else region.h - th)
+            r = media.Region(x - x % 2, y - y % 2, tw, th, region.full_w, region.full_h, region.rotate)
+            out.append(r)
+    return out
+
+
+def save_tiles(path: Path, t: float, base: Path, region: media.Region) -> list[str]:
+    """代表画面の部分拡大（左上・右上・左下・右下）を保存する。"""
+    names = ["左上", "右上", "左下", "右下"]
+    out = []
+    for k, r in enumerate(tile_regions(region)):
+        width = min(FRAME_MAX_EDGE if r.w >= r.h else int(FRAME_MAX_EDGE * r.w / r.h), int(r.w * TILE_SCALE))
+        width -= width % 2
+        jpg = media.extract_frame(path, t, base.with_name(f"{base.stem}_tile{k}{base.suffix}"), region=r,
+                                  max_width=width, min_width=width if width > r.w else 0)
+        out.append({"frame": str(jpg), "label": names[k]})
+    return out
+
+
+def distinct_events(events: list[dict], times: list[float], frames: list[np.ndarray], max_bits: int = 2) -> list[dict]:
+    """場面内の画面の変化をすべて残す（短時間だけ表示された操作・設定を落とさない）。
+    直前に残した画面とほぼ同じ（差分ハッシュの差が max_bits 以下）ものだけを除く。"""
+    out, last = [], None
+    for e in sorted(events, key=lambda e: e["time"]):
+        k = min(range(len(times)), key=lambda i: abs(times[i] - e["time"])) if times else None
+        h = dhash(frames[k]) if k is not None else None
+        if last is not None and h is not None and hamming(last, h) <= max_bits:
+            continue
+        out.append(e)
+        last = h
+    return out
 
 
 def sinfo_of(seg: dict, info: media.ProbeInfo) -> media.ProbeInfo:
@@ -284,13 +337,13 @@ def sinfo_of(seg: dict, info: media.ProbeInfo) -> media.ProbeInfo:
 
 
 def save_frame(path: Path, t: float, out: Path, region: media.Region, info: media.ProbeInfo,
-               edge: int = FRAME_EDGE) -> Path:
+               mode: str = "native") -> Path:
     """画面を保存する。切り出す範囲の外に普段と違う表示がある画面（安全確認に通らない画面）は切り出さずに全体で保存する。"""
     if not region.is_full and not media.crop_is_safe(path, t, region):
         W, H = (info.height, info.width) if region.rotate else (info.width, info.height)
         region = media.Region(0, 0, W, H, W, H, region.rotate)
         out = out.with_name(out.stem + "_full" + out.suffix)
-    return media.extract_frame(path, t, out, region=region, **frame_size(region, edge))
+    return media.extract_frame(path, t, out, region=region, **frame_size(region, mode))
 
 
 # ---------------- 末尾の除外（実験経過動画） ----------------
@@ -369,6 +422,7 @@ def ocr_image(ocr: media.OCR, path: Path) -> str:
 
 def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.Transcriber | None,
                interval: float = 1.0, max_events_per_scene: int = 4, frame_width: int = FRAME_MIN_EDGE,
+               detail: bool = False,
                asr_chunk: float = 600.0, role: dict | None = None, meta_path: Path | None = None, log=print) -> dict:
     """role: {"kind": "experiment", "window": 15, "trim_end": True} など（資料の役割。configs の reading.roles）
     meta_path: 元のファイル（path が入れ直した MKV のとき）。録画の長さは元のファイルで測る"""
@@ -446,18 +500,23 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
                 sc["frame"] = scenes_all[same]["frame"]
                 sc["ocr"] = scenes_all[same]["ocr"]
             else:
-                jpg = save_frame(path, t, out_dir / f"scene_{i:04d}.jpg", region, sinfo_of(seg, info), frame_width)
+                jpg = save_frame(path, t, out_dir / f"scene_{i:04d}.jpg", region, sinfo_of(seg, info),
+                                 "detail" if detail else "native")
+                if detail and not jpg.stem.endswith("_full"):
+                    sc["tiles"] = save_tiles(path, t, jpg, region)
                 sc["frame"] = str(jpg)
                 sc["ocr"] = ocr_image(ocr, jpg) if mode != "experiment" else ""
             if mode == "experiment":  # 区間の始めと終わりの画面も保存（変化の確認用）
                 extra = [round(sc["start"] + 0.5, 2), round(max(sc["start"], sc["end"] - 0.5), 2)]
                 evs = [{"time": x, "change": None} for x in extra if abs(x - t) > 1.0]
+            elif detail:  # Excel・レポートの作り方: 変化した画面をすべて（同じ画面の繰り返しだけ除く）
+                evs = distinct_events(sc["events"], times, frames)
             else:
                 evs = sorted(sc["events"], key=lambda e: -e["change"])[:max_events_per_scene]
             for e in sorted(evs, key=lambda e: e["time"]):
-                jpg = save_frame(path, min(e["time"] + (0.5 if e["change"] else 0.0), s_end - 0.1),
+                jpg = save_frame(path, min(e["time"] + (0.5 if e["change"] and not detail else 0.0), s_end - 0.1),
                                  out_dir / f"scene_{i:04d}_ev_{int(e['time'] * 10):07d}.jpg", region,
-                                 sinfo_of(seg, info), frame_width)
+                                 sinfo_of(seg, info), "detail" if detail else "native")
                 e["frame"] = str(jpg)
             sc["events_with_frames"] = [e for e in evs if e.get("frame")]
             sc["start"], sc["end"] = round(sc["start"], 2), round(sc["end"], 2)

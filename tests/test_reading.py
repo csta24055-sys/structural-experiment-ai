@@ -330,7 +330,11 @@ def test_role_matching_and_teacher_timeline_is_not_filled():
     st = role_for(cfg, "鋼材実験経過生徒1/IMG_1 (1).MOV")
     assert (t1["order"], t2["order"]) == (1, 2) and t1["trim_end"] and t2["sequence"] == "teacher"
     assert st["sequence"] == "student" and not st.get("trim_end") and "order" not in st
-    assert role_for(cfg, "レポートの作り方1/x.MP4") == {} and role_for(cfg, "事前説明2/y.MP4") == {}
+    assert role_for(cfg, "事前説明2/y.MP4") == {}
+    for path in ("レポートの作り方1/x.MP4", "レポートの作り方2/x.MP4", "エクセルの作り方1/x.MP4"):
+        r = role_for(cfg, path)
+        assert r["kind"] == "lecture_detail" and r["interval"] == 0.5 and r["asr_model"] == "large-v3"
+    assert t1["group"] == 4 and st["group"] == 4
 
     def sc(a, b):
         return {"start": a, "end": b, "frame": None, "speech": []}
@@ -390,15 +394,19 @@ def test_orientation_runs_detect_sideways_screen_and_ignore_blips():
     assert [r[2] for r in runs] == [0, 90] and runs[1][0] == 20.0  # 1回だけの揺れは無視
 
 
-def test_frame_size_keeps_the_resolution_the_ai_used_to_see():
-    """資料の部分が AI に見える大きさ（長辺 1568）は従来と同じ。切り出しが小さければ拡大する。"""
+def test_frame_size_native_and_detail():
     from structlab.media import Region
-    from structlab.reading.video_read import frame_size
+    from structlab.reading.video_read import frame_size, tile_regions
+    # 通常（2,350円構成）: 切り出しは元の解像度（長辺 1000 未満は拡大）、画面全体は 1568
     assert frame_size(Region(0, 0, 1920, 1080, 1920, 1080)) == {"max_width": 1568, "min_width": 0}
-    assert frame_size(Region(10, 10, 886, 514, 2532, 1170)) == {"max_width": 1568, "min_width": 1568}
-    assert frame_size(Region(10, 10, 1196, 670, 2532, 1170))["max_width"] == 1568
-    tall = frame_size(Region(0, 0, 1170, 2532, 1170, 2532))
-    assert tall["max_width"] == int(1568 * 1170 / 2532) - int(1568 * 1170 / 2532) % 2
+    assert frame_size(Region(10, 10, 1196, 670, 2532, 1170)) == {"max_width": 1196, "min_width": 0}
+    assert frame_size(Region(10, 10, 886, 514, 2532, 1170)) == {"max_width": 1000, "min_width": 1000}
+    # Excel・レポートの作り方: 資料の部分を 2 倍（最大 2576）
+    assert frame_size(Region(10, 10, 928, 612, 2532, 1170), "detail") == {"max_width": 1856, "min_width": 1856}
+    assert frame_size(Region(0, 0, 2532, 1170, 2532, 1170), "detail")["max_width"] == 2576
+    tiles = tile_regions(Region(100, 200, 900, 600, 2532, 1170))
+    assert len(tiles) == 4 and tiles[0].x == 100 and tiles[3].x + tiles[3].w == 1000 and tiles[3].y + tiles[3].h == 800
+    assert tiles[0].w > 450 and tiles[0].h > 300  # 境目が切れないよう重ねる
 
 
 def test_experiment_windows_are_read_one_by_one_by_default():
@@ -487,3 +495,117 @@ def test_batch_mode_collects_then_reads_saved_results(tmp_path):
     assert r.flush_batch() == 2 and len(sent) == 2
     assert r._ai_cached(rec, "b", lambda: None) == {"n": 1} and r.usage["calls"] == 2
     assert json.loads((tmp_path / "out" / "batch_state.json").read_text())  # 中断しても送り直さないための記録
+
+
+def test_detail_keeps_every_distinct_change():
+    import numpy as np
+    from structlab.reading.video_read import distinct_events
+    rng = np.random.default_rng(3)
+    a, b, c = (rng.integers(0, 255, (20, 40)).astype(np.uint8) for _ in range(3))
+    times = [0.0, 0.5, 1.0, 1.5, 2.0]
+    frames = [a, b, b, c, a]
+    evs = [{"time": t, "change": 0.1} for t in (0.5, 1.0, 1.5, 2.0)]
+    kept = [e["time"] for e in distinct_events(evs, times, frames)]
+    assert kept == [0.5, 1.5, 2.0]  # 0.5 秒だけ出た画面も残し、同じ画面の繰り返しだけ除く
+
+
+def test_detail_requests_split_and_merge(tmp_path):
+    from PIL import Image
+    from structlab.models import fmt_time
+    from structlab.reading import ai_read
+    f = tmp_path / "f.jpg"
+    Image.new("RGB", (100, 60), "white").save(f)
+    sc = {"index": 3, "start": 0, "end": 60, "frame_time": 1, "frame": str(f), "ocr": "",
+          "tiles": [{"frame": str(f), "label": n} for n in ("左上", "右上", "左下", "右下")],
+          "events_with_frames": [{"time": float(i), "frame": str(f)} for i in range(30)],
+          "speech": [{"start": 2.0, "end": 4.0, "text": "ここは必ず絶対参照にしてください"}]}
+    reqs = ai_read.video_detail_requests("excel", sc, fmt_time)
+    assert len(reqs) == 3 and len(reqs[0].images) == 1 + 4 + 12 and len(reqs[1].images) == 1 + 1 + 12
+    assert "絶対参照" in reqs[0].text and reqs[0].schema is ai_read.DETAIL_SCHEMA
+    base = {k: [] for k in ai_read.DETAIL_SCHEMA["required"]}
+    base.update({"title": "t", "notes": ""})
+    parts = [{**base, "operations": [{"time": "0:01", "action": "a", "target": "B3", "value": "=A3*2"}]},
+             {**base, "speech_points": [{"time": "0:02", "text": "必ず絶対参照", "source": "speech"}]}, None]
+    m = ai_read.merge_detail(parts)
+    assert len(m["operations"]) == 1 and len(m["speech_points"]) == 1 and "未完了" in m["notes"]
+    assert m["unreadable"]  # 欠けた部分は読めなかったこととして残る
+
+
+@needs_ffmpeg
+def test_detail_mode_saves_tiles_and_all_changes(tmp_path):
+    from structlab import media
+    from structlab.reading.video_read import read_video
+    v = tmp_path / "rec.mp4"
+    make_screen_recording(v, tmp_path / "w", [["SLIDE A", "Load 23.0 kN"], ["SLIDE B", "Strain 2000"]], secs_each=6)
+    rec = read_video(v, tmp_path / "out", ocr=media.OCR("none", "eng"), transcriber=None, interval=0.5, detail=True,
+                     log=lambda m: None)
+    uniq = [sc for sc in rec["scenes"] if sc.get("same_as") is None]
+    assert uniq and all(len(sc.get("tiles", [])) == 4 for sc in uniq)
+    from PIL import Image
+    w = Image.open(uniq[0]["frame"]).size[0]
+    assert w >= 2 * rec["region"]["w"] - 2  # 資料の部分を 2 倍で保存
+
+
+def test_semantic_bridge_reuses_reading_results(tmp_path):
+    """読み取り結果を意味理解層の場面にする（120 秒ごと・除外した末尾を含めない・画像は第3回の照合だけ）。"""
+    from structlab.db import DB
+    from structlab.reading.semantic_bridge import load_records, run_semantic
+    from structlab.semantic.material import build_scenes
+    frame = tmp_path / "f.jpg"
+    from PIL import Image
+    Image.new("RGB", (64, 48), "white").save(frame)
+    rec = {"path": "鋼材実験経過先生1/a.MP4", "kind": "video", "duration": 300.0, "valid_end": 250.0, "has_audio": True,
+           "content_hash": "h1", "transcriber": "large-v3-turbo",
+           "scenes": [{"index": i, "start": 15.0 * i, "end": 15.0 * i + 15, "frame_time": 15.0 * i + 7, "frame": str(frame),
+                       "mode": "experiment", "ai": {"face": "front", "specimen_state": f"状態{i}"}} for i in range(20)],
+           "speech": [{"start": 10.0, "end": 12.0, "text": "ここは必ず記録してください"},
+                      {"start": 260.0, "end": 262.0, "text": "除外した部分の発話"}]}
+    pdf = {"path": "p.pdf", "kind": "pdf", "content_hash": "h2", "n_pages": 1,
+           "pages": [{"page": 1, "text_layer": "提出期限は必ず守ること", "rows": ["提出期限は必ず守ること"], "render": str(frame),
+                      "ai": {"title": "注意"}, "needs_vision": False}]}
+    db = DB(tmp_path / "s.db")
+    fids = load_records(db, {rec["path"]: rec, pdf["path"]: pdf}, 120.0)
+    v = db.q1("SELECT * FROM files WHERE id=?", (fids[1],)) if db.q1("SELECT kind FROM files WHERE id=?", (fids[0],))["kind"] == "pdf" \
+        else db.q1("SELECT * FROM files WHERE id=?", (fids[0],))
+    scenes = build_scenes(db, v)
+    assert [round(s.t_end) for s in scenes] == [120, 240, 250]       # 末尾（250 秒以降）は含めない
+    assert all(not s.images for s in scenes)                          # 読み取り済みの画像は第1回では送らない
+    assert "状態0" in scenes[0].material and any("必ず記録" in ln.text for ln in scenes[0].lines)
+    assert not any("除外した部分" in ln.text for s in scenes for ln in s.lines)
+    p = db.q1("SELECT * FROM files WHERE kind='pdf'")
+    ps = build_scenes(db, p)
+    assert ps[0].verify_images and not ps[0].images                   # PDF のページ画像は照合のときだけ
+    db.close()
+    res = run_semantic(make_cfg(tmp_path, tmp_path), tmp_path / "sem", {rec["path"]: rec, pdf["path"]: pdf}, None,
+                       log=lambda m: None)
+    d = json.loads((tmp_path / "sem" / "semantic" / "directives.json").read_text(encoding="utf-8"))
+    assert res["usage"]["calls"] == 0 and any("必ず記録" in x["content"] for x in d)
+
+
+def test_semantic_bridge_batches_ai_calls_without_deadlock(tmp_path):
+    """資料ごとの意味理解（第1〜3回）を並行に進め、AI の呼び出しを Batch でまとめて送る（Mock で確認）。"""
+    from structlab.ai.mock_provider import MockProvider
+    from structlab.reading.semantic_bridge import run_semantic
+
+    class BatchMock(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.batches = []
+
+        def analyze_batch(self, reqs, log=print, known=None, on_created=None):
+            self.batches.append(len(reqs))
+            return [self.analyze(r) for r in reqs]
+    recs = {}
+    for n in range(2):
+        recs[f"v{n}.mp4"] = {"path": f"v{n}.mp4", "kind": "video", "duration": 250.0, "has_audio": True,
+                             "content_hash": f"h{n}", "transcriber": "x",
+                             "scenes": [{"index": 0, "start": 0, "end": 250, "frame_time": 1, "frame": "",
+                                         "mode": "slides", "ai": {"title": "t", "text_blocks": [{"text": "必ず単位を書くこと", "role": "body"}]}}],
+                             "speech": [{"start": 5.0, "end": 8.0, "text": "グラフには必ず軸ラベルを書いてください"},
+                                        {"start": 130.0, "end": 133.0, "text": "考察は自分の言葉で書いてください"}]}
+    cfg = make_cfg(tmp_path, tmp_path)
+    cfg.data["semantic"]["ai"] = True
+    prov = BatchMock()
+    res = run_semantic(cfg, tmp_path / "sem", recs, prov, batch=True, log=lambda m: None)
+    assert res["usage"]["calls"] > 0 and res["usage"]["failed"] == 0
+    assert max(prov.batches) >= 2   # 2つの資料の依頼が同じ Batch にまとまった

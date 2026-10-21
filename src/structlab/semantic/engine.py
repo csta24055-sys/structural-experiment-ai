@@ -737,7 +737,7 @@ class SemanticEngine:
         if not is_time_based(frow["kind"]) or d["t_start"] is None:
             sc = next((s for s in scenes if s.unit_id == d["unit_id"]), None)
             if sc:
-                images = [AIImage(p, lbl) for p, lbl in sc.images[:self.max_images]]
+                images = [AIImage(p, lbl) for p, lbl in (sc.verify_images or sc.images)[:self.max_images]]
             return "", images
         t0 = max(0.0, d["t_start"] - expand)
         t1 = (d["t_end"] or d["t_start"]) + expand

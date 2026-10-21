@@ -31,6 +31,13 @@
   フィードバックを受け取る前に、その内容を推測して実装しない
 - 話者識別はしていない。動画の音声を「先生の指示」と断定しない（利用者が確認した場合のみ `semantic.video_speaker: teacher`）
 
+## 要求事項の台帳（本番解析・Excel・レポートで共通）
+- 利用者の指示は `requirements/process.yaml`（指示の出典・工程・確認方法。訂正は superseded、矛盾は conflicts に双方を残す）。
+  新しい指示を受けたら台帳に追加する（既存の項目を消さない）
+- 解析の完了時に `structlab requirements verify --stage analysis ...`、Excel・レポートの作成時に
+  `structlab requirements checklist/verify --stage excel|report` で同じ台帳（先生の要求事項・未確認事項を含む）を照合する。
+  「要確認」「未検証」「未実施」「矛盾」は成功ではない
+
 ## 守ること
 - 実際の資料・解析結果（`work/`）・`config.yaml`・`.env` をコミットしない
 - 元資料フォルダ（`/鋼材実験レポート用`）には書き込まない

@@ -3,4 +3,4 @@
 allow_external_ai: false
 # count_tokens: true は入力トークンの実測（API の count_tokens。推論しないので課金なし）
 count_tokens: true
-request: 2026-10-21 v5 free pass (lossless optimizations only) + input token measurement
+request: 2026-10-21 v6 free pass (2,350 config + 3 frames/window + Excel/Report detail) + semantic rules + requirements ledger + token counts
