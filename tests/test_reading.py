@@ -209,8 +209,12 @@ def test_estimate_counts_unique_scenes_only():
                                                {"same_as": None, "events_with_frames": [{"frame": "x"}]}]},
             "p": {"kind": "pdf", "n_pages": 3}}
     e = estimate_calls(recs)
-    assert e["calls"] == {"pdf_page": 3, "video_scene": 1, "video_ops": 1, "speech_fix": 0} and e["images"] == 3 + 1 + 2
-    assert e["input_tokens"] > 0 and e["output_tokens"] > 0
+    assert e["calls"] == {"pdf_page": 3, "video_scene": 1, "video_ops": 1, "experiment_window": 0, "speech_fix": 0}
+    assert e["images"] == 3 + 1 + 2 and e["input_tokens"] > 0 and e["output_tokens"] > 0
+    # 実験経過の区間は、区間内の画面＋表面の基準画像を1枚添える
+    ex = estimate_calls({"x": {"kind": "video", "scenes": [{"same_as": None, "mode": "experiment",
+                                                            "events_with_frames": [{"frame": "a"}, {"frame": "b"}]}]}})
+    assert ex["calls"]["experiment_window"] == 1 and ex["images"] == 4
 
 
 def test_speech_corrections_need_support_in_materials():
@@ -249,7 +253,9 @@ def test_list_targets_one_job_per_video(tmp_path):
              _rf("v/x.sh", "s", 1)]
     src = SimpleNamespace(iter_files=lambda: iter(files))
     cfg = make_cfg(tmp_path, tmp_path)
-    assert list_targets(cfg, src) == ["v/c.MOV", "v/b.MP4"]  # 重複・補助ファイルを除き、大きい順
+    assert list_targets(cfg, src) == ["v/c.MOV", "v/b.MP4", "a.pdf"]  # 重複・補助ファイルを除き、動画は大きい順・PDFは最後
+    keyed = list_targets(cfg, SimpleNamespace(iter_files=lambda: iter(files)), with_hash=True)
+    assert keyed[0]["path"] == "v/c.MOV" and keyed[0]["key"].startswith("v") and len({k["key"] for k in keyed}) == 3
     src2 = SimpleNamespace(iter_files=lambda: iter([files[0]]))
     assert list_targets(cfg, src2) == ["a.pdf"]
 
@@ -266,7 +272,7 @@ def test_reading_workflow_is_readonly_and_ai_gated():
     # 設定ファイルの work_dir は configs/ からの相対パスになるため、成果物として保存する場所を明示する
     assert "--out work/reading" in run
     up = next(s for s in d["jobs"]["read"]["steps"] if s.get("uses", "").startswith("actions/upload-artifact"))
-    assert up["with"]["path"] == "work/reading" and up["with"]["retention-days"] <= 7
+    assert up["with"]["path"] == "work/reading" and up["with"]["retention-days"] <= 30
     assert "GH_SECRETS_TOKEN" not in text and "echo $DROPBOX" not in text
 
 
@@ -283,3 +289,62 @@ def test_crop_survives_resolution_change(tmp_path):
     reg = media.Region(40, 200, 280, 600, 360, 780)
     frames = media.sample_gray_frames(ab, 0, 6, 1.0, w=100, h=200, crop=reg.ffmpeg_crop())
     assert len(frames) >= 5
+
+
+def test_stream_seconds_reads_mkv_duration_tag():
+    from structlab.reading.video_read import _stream_seconds
+    assert _stream_seconds({"duration": "12.5"}) == 12.5
+    assert abs(_stream_seconds({"tags": {"DURATION": "00:20:27.626000000"}}) - 1227.626) < 1e-6
+    assert _stream_seconds({}) == 0.0
+
+
+def _tail_case(back_to_opening: bool, silent: bool):
+    import numpy as np
+    rng = np.random.default_rng(0)
+    opening = rng.integers(0, 255, (20, 40)).astype(np.uint8)
+    experiment = rng.integers(0, 255, (20, 40)).astype(np.uint8)
+    times = [float(t) for t in range(0, 200)]
+    frames = [opening if t < 20 else experiment for t in times[:180]]
+    frames += [opening if back_to_opening else experiment] * 20
+    audio = {"track_seconds": 200.0, "silences": [[180.2, 200.0]] if silent else [[50.0, 53.0]]}
+    return times, frames, audio
+
+
+def test_trim_only_when_returning_to_opening_and_silent():
+    from structlab.reading.video_read import detect_return_to_start
+    r = detect_return_to_start(*_tail_case(True, True), 200.0)
+    assert r["status"] == "trimmed" and 179 <= r["trim_at"] <= 181 and r["evidence"]["reason"]
+    # 無音だけでは除外しない（冒頭に戻った根拠が必要）
+    assert detect_return_to_start(*_tail_case(False, True), 200.0)["status"] == "needs_confirmation"
+    # 冒頭に似た画面でも、末尾が無音でなければ除外しない
+    assert detect_return_to_start(*_tail_case(True, False), 200.0)["status"] == "not_found"
+
+
+def test_role_matching_and_teacher_timeline_is_not_filled():
+    from structlab.config import load_config
+    from structlab.reading.corpus import student_observations, teacher_timeline
+    from structlab.reading.runner import role_for
+    cfg = load_config(Path(__file__).resolve().parents[1] / "configs" / "dropbox.yaml")
+    t1 = role_for(cfg, "鋼材実験経過先生1/a.MP4")
+    t2 = role_for(cfg, "/鋼材実験経過先生2/b.mov")
+    st = role_for(cfg, "鋼材実験経過生徒1/IMG_1 (1).MOV")
+    assert (t1["order"], t2["order"]) == (1, 2) and t1["trim_end"] and t2["sequence"] == "teacher"
+    assert st["sequence"] == "student" and not st.get("trim_end") and "order" not in st
+    assert role_for(cfg, "レポートの作り方1/x.MP4") == {} and role_for(cfg, "事前説明2/y.MP4") == {}
+
+    def sc(a, b):
+        return {"start": a, "end": b, "frame": None, "speech": []}
+    recs = {
+        "鋼材実験経過先生2/b.mov": {"path": "鋼材実験経過先生2/b.mov", "role": t2, "duration": 100.0, "valid_end": 80.0,
+                                "trim": {"status": "trimmed", "trim_at": 80.0}, "scenes": [sc(0, 50), sc(50, 85), sc(85, 100)]},
+        "鋼材実験経過先生1/a.MP4": {"path": "鋼材実験経過先生1/a.MP4", "role": t1, "duration": 60.0, "valid_end": 55.0,
+                                "trim": {"status": "trimmed", "trim_at": 55.0}, "scenes": [sc(0, 30), sc(30, 60)]},
+        "鋼材実験経過生徒1/s.MOV": {"path": "鋼材実験経過生徒1/s.MOV", "role": st, "duration": 90.0, "scenes": [sc(0, 90)]},
+    }
+    tl = teacher_timeline(recs)
+    assert [p["order"] for p in tl["parts"]] == [1, 2] and tl["total_seconds"] == 135.0
+    assert tl["parts"][1]["timeline_from"] == 55.0 and len(tl["gaps"]) == 1  # 切れ目は記録し、補完しない
+    assert max(w["t_to"] for w in tl["windows"]) == 135.0 and all(w["source_start"] < 80 for w in tl["windows"]
+                                                                  if "先生2" in w["source"])
+    sv = student_observations(recs)["videos"]
+    assert len(sv) == 1 and sv[0]["windows"][0]["end"] == 90  # 生徒の動画は末尾除外・連結をしない

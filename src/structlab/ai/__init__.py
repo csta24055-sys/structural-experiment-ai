@@ -27,6 +27,17 @@ def make_provider(cfg, allow_external_flag: bool = False) -> tuple[AIProvider | 
     raise AIError(f"未知のプロバイダ: {p}", retryable=False)
 
 
+def make_escalation_provider(cfg, allow_external_flag: bool = False) -> AIProvider | None:
+    """複雑な部分の読み直しに使う上位モデル（ai.escalation_model）。未設定・送信不可なら None。"""
+    ai = cfg.data["ai"]
+    model = ai.get("escalation_model")
+    if not model or ai["provider"] != "anthropic" or not (ai.get("allow_external") or allow_external_flag):
+        return None
+    from .anthropic_provider import AnthropicProvider
+    return AnthropicProvider(model=model, effort=ai["effort"], max_tokens=ai["max_output_tokens"],
+                             use_fallbacks=ai["use_fallbacks"], max_image_edge=ai["max_image_edge"])
+
+
 def items_from_response(data: dict[str, Any], corpus: str, *, analyzer: str, page: int | None,
                         t_start: float | None, t_end: float | None) -> tuple[list[Item], list[dict]]:
     """AI出力を検証して Item に変換する。AIの出力は無条件に信用しない:

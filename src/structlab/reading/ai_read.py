@@ -23,6 +23,8 @@ SYSTEM = """あなたは建築構造実験の授業資料（PDFのページ、�
 - 動画の画面: 再生アプリやブラウザの表示（時計、URL、ボタン）は書き起こさない。資料の部分だけ
 - 操作の画面（Excel など）が続けて渡された場合は、画面の差から行われた操作を operations に時刻付きで書く
   （例: セル B3 に =A3*2 を入力、グラフの種類を散布図に変更）。見て分からない操作は推測しない
+- スマホの通知のバナー・他のアプリの表示が重なっている場合、その内容は書き起こさない（個人の情報のため）。
+  資料が隠れて読めない部分は unreadable に「通知で隠れている」と書く
 - 参考として渡すテキスト（PDFの文字情報・OCR）は誤りを含むことがある。画像と食い違う場合は画像を優先し、notes に書く"""
 
 _STR = {"type": "string"}
@@ -66,11 +68,14 @@ SCHEMA = {
     },
 }
 
-#: 1回あたりの概算トークン（見積もり用。画像は 1568px 程度に縮小して送る）
-EST_IMAGE_TOKENS = 1600
-EST_FIXED_INPUT = 2200     # 指示文・スキーマ
-EST_OUTPUT = {"pdf_page": 1500, "video_scene": 1100, "video_ops": 1300, "speech_fix": 1200}
-EST_SPEECH_INPUT = 6000    # 文字起こし 120 区間＋用語
+#: 1回あたりの概算トークン（見積もり用。画像は長辺 1568px 程度に縮小して送る＝約 2,500 トークン）。
+#: 出力には思考（thinking）の分も含む
+EST_IMAGE_TOKENS = 2500
+EST_FIXED_INPUT = 2600     # 指示文・スキーマ
+EST_OUTPUT = {"pdf_page": 4000, "video_scene": 3000, "video_ops": 3500, "experiment_window": 3000,
+              "speech_fix": 3000}
+EST_SPEECH_INPUT = 7000    # 文字起こし 120 区間＋用語
+EST_ESCALATION_RATE = 0.15  # 照合で要確認になり上位モデルで読み直す割合（見積もり上の仮定）
 
 
 def pdf_page_request(file_label: str, page: dict) -> AIRequest:
@@ -80,7 +85,7 @@ def pdf_page_request(file_label: str, page: dict) -> AIRequest:
             "このページの画像を、指示どおりに書き起こしてください。")
     return AIRequest(task="read_pdf_page", source_label=f"{file_label} p.{page['page']}", text=text,
                      images=[AIImage(Path(page["render"]), f"p.{page['page']}")], system=SYSTEM, schema=SCHEMA,
-                     max_tokens=6000)
+                     max_tokens=16000)
 
 
 def video_scene_request(file_label: str, scene: dict, fmt_time) -> AIRequest:
@@ -95,30 +100,41 @@ def video_scene_request(file_label: str, scene: dict, fmt_time) -> AIRequest:
             + "画面の資料部分を、指示どおりに書き起こしてください。")
     return AIRequest(task="read_video_scene", source_label=f"{file_label} {fmt_time(scene['start'])}", text=text,
                      images=imgs, t_start=scene["start"], t_end=scene["end"], system=SYSTEM, schema=SCHEMA,
-                     max_tokens=6000)
+                     max_tokens=16000)
 
 
 def estimate_calls(records: dict[str, dict]) -> dict:
-    """ローカルの読み取り結果から、AI の呼び出し回数と概算トークンを数える（APIは呼ばない）。"""
-    calls = {"pdf_page": 0, "video_scene": 0, "video_ops": 0, "speech_fix": 0}
-    images = 0
+    """ローカルの読み取り結果から、AI の呼び出し回数と概算トークンを数える（APIは呼ばない）。
+    escalation は照合で要確認になったものを上位モデルで読み直す分の見込み（EST_ESCALATION_RATE を仮定）。"""
+    calls = {"pdf_page": 0, "video_scene": 0, "video_ops": 0, "experiment_window": 0, "speech_fix": 0}
+    images = {k: 0 for k in calls}
     for rec in records.values():
         if rec["kind"] == "pdf":
             calls["pdf_page"] += rec["n_pages"]
-            images += rec["n_pages"]
+            images["pdf_page"] += rec["n_pages"]
         elif rec["kind"] == "video":
             for sc in rec["scenes"]:
                 if sc.get("same_as") is not None:
                     continue
                 n_ev = len(sc.get("events_with_frames", []))
-                calls["video_ops" if n_ev else "video_scene"] += 1
-                images += 1 + n_ev
+                if sc.get("mode") == "experiment":
+                    key, extra = "experiment_window", 1  # 表面の基準画像を1枚添える
+                else:
+                    key, extra = ("video_ops" if n_ev else "video_scene"), 0
+                calls[key] += 1
+                images[key] += 1 + n_ev + extra
             calls["speech_fix"] += len(speech_chunks(rec.get("speech", [])))
-    n = sum(calls.values())
-    n_img = n - calls["speech_fix"]
-    in_tok = n_img * EST_FIXED_INPUT + images * EST_IMAGE_TOKENS + n_img * 600 + calls["speech_fix"] * EST_SPEECH_INPUT
+    in_tok = sum((EST_FIXED_INPUT + 600) * n for k, n in calls.items() if k != "speech_fix") \
+        + sum(images.values()) * EST_IMAGE_TOKENS + calls["speech_fix"] * EST_SPEECH_INPUT
     out_tok = sum(EST_OUTPUT[k] * v for k, v in calls.items())
-    return {"calls": calls, "total_calls": n, "images": images, "input_tokens": in_tok, "output_tokens": out_tok}
+    image_calls = sum(v for k, v in calls.items() if k != "speech_fix")
+    image_in = sum(images.values()) * EST_IMAGE_TOKENS + image_calls * (EST_FIXED_INPUT + 600)
+    image_out = sum(EST_OUTPUT[k] * v for k, v in calls.items() if k != "speech_fix")
+    return {"calls": calls, "total_calls": sum(calls.values()), "images": sum(images.values()),
+            "input_tokens": in_tok, "output_tokens": out_tok,
+            "escalation": {"calls": round(image_calls * EST_ESCALATION_RATE),
+                           "input_tokens": round(image_in * EST_ESCALATION_RATE),
+                           "output_tokens": round(image_out * EST_ESCALATION_RATE)}}
 
 
 # ---------------- 文字起こしの専門用語の訂正（テキストのみ・画像なし） ----------------
@@ -155,4 +171,61 @@ def speech_fix_request(file_label: str, start_index: int, segs: list[dict], voca
             f"## 資料（スライド・PDF）に出てくる用語\n{vocab[:4000]}\n\n## 文字起こし\n{body}\n\n"
             "指示どおりに、専門用語の誤認識だけを訂正してください。")
     return AIRequest(task="fix_speech", source_label=f"{file_label} 音声", text=text, system=SPEECH_SYSTEM,
-                     schema=SPEECH_SCHEMA, max_tokens=4000)
+                     schema=SPEECH_SCHEMA, max_tokens=12000)
+
+
+# ---------------- 実験経過の動画（一定間隔の区間） ----------------
+EXPERIMENT_SYSTEM = """あなたは鉄筋コンクリート梁の加力実験の経過を記録した動画を観察し、見えている事実だけを記録する担当者です。
+推測や一般論で補わず、画像から確認できることだけを書いてください。
+
+厳守:
+- 試験体のどの面が映っているか: 基準画像（撮影開始時に映っていた面＝表面）と比べて、表面(front)・裏面(back)・
+  両方/斜め(both)・判別できない(unknown) を判断し、根拠（形・配置・書き込み・ひび割れの一致など）を書く
+- ひび割れ: 位置（支点・載荷点・中央などからの位置、上下）、向き（斜め・鉛直・水平）、新しく現れたか・伸びたかを、
+  区間の最初と最後の画像を比べて書く。画像から分からないことは書かない
+- 加力の様子・計測器の表示（荷重計・変位計の数値、マーカーの書き込み）は、読める数値だけを写す（approx の区別をする）
+- 人の操作（ジャッキの操作、マーキング、撮影位置の移動）を書く
+- 画面に重なった通知・他のアプリの表示は書かない
+- 確実でない記述は uncertain に入れる"""
+
+EXPERIMENT_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["face", "face_evidence", "view", "specimen_state", "cracks", "loading", "readings", "actions",
+                 "visible_text", "uncertain"],
+    "properties": {
+        "face": {"type": "string", "enum": ["front", "back", "both", "unknown", "not_specimen"]},
+        "face_evidence": _STR,
+        "view": _STR,
+        "specimen_state": _STR,
+        "cracks": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["location", "direction", "change"],
+            "properties": {"location": _STR, "direction": _STR,
+                           "change": {"type": "string", "enum": ["new", "extended", "widened", "existing", "unclear"]}}}},
+        "loading": _STR,
+        "readings": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["what", "value", "approx"],
+            "properties": {"what": _STR, "value": _STR, "approx": {"type": "boolean"}}}},
+        "actions": {"type": "array", "items": _STR},
+        "visible_text": {"type": "array", "items": _STR},
+        "uncertain": {"type": "array", "items": _STR},
+    },
+}
+
+
+def experiment_window_request(file_label: str, scene: dict, fmt_time, reference: str | None,
+                              who: str) -> AIRequest:
+    imgs = []
+    if reference:
+        imgs.append(AIImage(Path(reference), "基準画像（撮影開始時に映っていた試験体の面＝表面）"))
+    frames = sorted([(e["time"], e["frame"]) for e in scene.get("events_with_frames", [])]
+                    + [(scene["frame_time"], scene["frame"])])
+    for t, f in frames:
+        imgs.append(AIImage(Path(f), f"{fmt_time(t)} の画面"))
+    speech = " ".join(s["text"] for s in scene.get("speech", []))[:1500]
+    text = (f"# 資料: {file_label}（{who}の実験経過動画） {fmt_time(scene['start'])}–{fmt_time(scene['end'])} の区間\n"
+            "最初の画像は比較用の基準画像、続く画像はこの区間の画面（時刻順）です。\n"
+            f"## 参考: この区間の音声の文字起こし（誤りを含む。画像で確認できないことは書かない）\n{speech or '（音声なし）'}\n\n"
+            "指示どおりに、この区間で見えていることを記録してください。")
+    return AIRequest(task="read_experiment_window", source_label=f"{file_label} {fmt_time(scene['start'])}", text=text,
+                     images=imgs, t_start=scene["start"], t_end=scene["end"], system=EXPERIMENT_SYSTEM,
+                     schema=EXPERIMENT_SCHEMA, max_tokens=12000)

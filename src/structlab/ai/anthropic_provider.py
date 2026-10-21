@@ -20,6 +20,9 @@ def encode_image(path, max_edge: int) -> tuple[str, str]:
     return "image/jpeg", base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
 
+STREAM_ABOVE = 16000
+
+
 class AnthropicProvider(AIProvider):
     name = "anthropic"
     external = True
@@ -60,12 +63,15 @@ class AnthropicProvider(AIProvider):
             output_config={"effort": self.effort,
                            "format": {"type": "json_schema", "schema": req.schema or OUTPUT_SCHEMA}},
         )
+        if self.use_fallbacks:
+            kwargs.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+        api = self.client.beta.messages if self.use_fallbacks else self.client.messages
         try:
-            if self.use_fallbacks:
-                resp = self.client.beta.messages.create(
-                    **kwargs, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+            if kwargs["max_tokens"] > STREAM_ABOVE:  # 長い出力は時間切れを避けるためストリーミングで受け取る
+                with api.stream(**kwargs) as st:
+                    resp = st.get_final_message()
             else:
-                resp = self.client.messages.create(**kwargs)
+                resp = api.create(**kwargs)
         except a.AuthenticationError as e:
             raise AIError(f"APIキーが無効です: {e}", retryable=False) from e
         except a.PermissionDeniedError as e:

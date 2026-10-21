@@ -583,7 +583,7 @@ def cmd_read(args) -> int:
     if args.list_targets:  # GitHub Actions で資料ごとに並列実行するための一覧（JSON）
         from .reading.runner import list_targets
         from .sources import make_source
-        print(json.dumps(list_targets(cfg, make_source(cfg)), ensure_ascii=False))
+        print(json.dumps(list_targets(cfg, make_source(cfg), with_hash=True), ensure_ascii=False))
         return 0
     _setup_logging(cfg, args.verbose)
     from .reading.runner import run_reading
@@ -594,9 +594,14 @@ def cmd_read(args) -> int:
         if provider is None:
             print(f"AI を使えません: {why}")
             return 1
+        from .ai import make_escalation_provider
+        escalation = make_escalation_provider(cfg, allow_external_flag=True)
+    else:
+        escalation = None
     if args.max_ai_calls is not None:
         cfg.data.setdefault("reading", {})["max_ai_calls"] = args.max_ai_calls
     summary = run_reading(cfg, only=args.only, allow_ai=args.allow_external_ai, provider=provider,
+                          escalation=escalation,
                           out_dir=Path(args.out) if args.out else None, log=lambda m: print(m, flush=True))
     out = Path(args.out) if args.out else cfg.work_dir / "reading"
     print((out / "summary.md").read_text(encoding="utf-8"))

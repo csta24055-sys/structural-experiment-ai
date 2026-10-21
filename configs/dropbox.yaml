@@ -37,12 +37,45 @@ transcription:
 ocr:
   backend: auto
 
+# 資料の読み取り（structlab read）。docs/READING.md 参照
+reading:
+  # AI の同時呼び出し数
+  ai_workers: 4
+  # 資料の役割。match はパスの glob（先頭一致の順）
+  roles:
+    # 先生の実験経過（画面録画）。1→2 で一続き。末尾で冒頭画面に戻った以降（無音）は除外する
+    - match: ["*/鋼材実験経過先生1/*"]
+      kind: experiment
+      who: 先生側の録画
+      window: 15
+      trim_end: true
+      sequence: teacher
+      order: 1
+    - match: ["*/鋼材実験経過先生2/*"]
+      kind: experiment
+      who: 先生側の録画
+      window: 15
+      trim_end: true
+      sequence: teacher
+      order: 2
+    # 生徒の撮影。表面・裏面を交互に撮影。先生側の末尾処理は適用しない
+    - match: ["*/鋼材実験経過生徒*/*"]
+      kind: experiment
+      who: 生徒の撮影
+      window: 15
+      faces: true
+      sequence: student
+
 ai:
   provider: anthropic
   # false のまま。外部送信は実行時に --allow-external-ai を付けたときだけ行う。
   allow_external: false
   model: "claude-opus-5-5"
-  effort: "medium"
+  effort: "high"
+  # 上位モデルでの読み直し（空なら使わない）。Fable 5.1 は利用できないため、すべて上の model（現在利用できる最上位）で読む
+  escalation_model: ""
+  escalation_price_input_per_mtok: 10.0
+  escalation_price_output_per_mtok: 50.0
   max_calls_per_run: 300
   max_input_tokens_per_run: 3000000
   max_output_tokens_per_run: 600000

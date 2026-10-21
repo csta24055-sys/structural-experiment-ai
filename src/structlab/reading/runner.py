@@ -8,12 +8,15 @@
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import re
 import shutil
+import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 from ..models import RemoteFile, fmt_time
@@ -21,6 +24,8 @@ from . import ai_read, verify
 from .inventory import as_dicts, build_inventory, inventory_markdown
 
 READ_KINDS = {"pdf", "video", "audio"}
+#: ローカルの読み取り方法を変えたら上げる（保存済みの読み取り結果を使い直さず、読み直すため）
+READ_VERSION = 3
 TERM = re.compile(r"[一-龥ァ-ヶー]{2,}")
 
 
@@ -30,6 +35,24 @@ def _safe(name: str) -> str:
 
 def _key(rf: RemoteFile) -> str:
     return (rf.content_hash or hashlib.sha256(rf.path.encode()).hexdigest())[:16]
+
+
+def role_for(cfg, path: str) -> dict:
+    """資料の役割（configs の reading.roles。例: 先生・生徒の実験経過動画）。一致しなければ {}。"""
+    for r in cfg.data.get("reading", {}).get("roles", []) or []:
+        full = "/" + path.lstrip("/")  # 取得元の相対パスでも「*/フォルダ/*」で一致させる
+        if any(fnmatch.fnmatch(full, pat) for pat in r.get("match", [])):
+            return {k: v for k, v in r.items() if k != "match"}
+    return {}
+
+
+def remux(src: Path, dest: Path) -> Path:
+    """映像・音声をそのまま（再圧縮せずに）MKV に入れ直す。目次の不完全な録画で、途中の画面の取り出しが
+    先頭からの読み直しになり極端に遅くなるのを防ぐ（内容は変わらない）。"""
+    from .. import media
+    media._run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a?",
+                "-c", "copy", str(dest)], timeout=3600)
+    return dest
 
 
 def vocabulary(pdf_records: list[dict], base: str = "", limit: int = 60) -> str:
@@ -43,12 +66,14 @@ def vocabulary(pdf_records: list[dict], base: str = "", limit: int = 60) -> str:
 
 
 class Reader:
-    def __init__(self, cfg, *, out_dir: Path | None = None, provider=None, log=print):
+    def __init__(self, cfg, *, out_dir: Path | None = None, provider=None, escalation=None, log=print):
         self.cfg = cfg
         self.out = Path(out_dir or cfg.work_dir / "reading")
         self.provider = provider
+        self.escalation = escalation if provider is not None else None
         self.log = log
-        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "failed": 0}
+        self.lock = threading.Lock()
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "failed": 0, "by_model": {}}
         self.pdf_vocab = ""
 
     # ---------- 1. 棚卸し ----------
@@ -66,7 +91,8 @@ class Reader:
         rec_path = d / "record.json"
         if rec_path.exists():
             rec = json.loads(rec_path.read_text(encoding="utf-8"))
-            if rec.get("content_hash") == rf.content_hash and rec.get("complete"):
+            if rec.get("content_hash") == rf.content_hash and rec.get("complete") \
+                    and rec.get("read_version") == READ_VERSION and rec.get("role", {}) == role_for(self.cfg, rf.path):
                 self.log(f"[済] {rf.path}")
                 return rec
         self.log(f"[読み取り] {rf.path}（{rf.size / 1e6:,.1f} MB）")
@@ -83,14 +109,20 @@ class Reader:
                 from .video_read import read_video
                 ocr = media.OCR(self.cfg.data["ocr"]["backend"], self.cfg.data["ocr"]["languages"])
                 rv = self.cfg.data.get("reading", {})
-                rec = read_video(local, d / "frames", ocr=ocr, transcriber=transcriber,
-                                 interval=float(rv.get("scene_interval_seconds", 1.0)),
-                                 max_events_per_scene=int(rv.get("max_events_per_scene", 4)), log=self.log)
+                mkv = remux(Path(local), self.cfg.cache_dir / f"read_{_key(rf)}.mkv")
+                try:
+                    rec = read_video(mkv, d / "frames", ocr=ocr, transcriber=transcriber,
+                                     interval=float(rv.get("scene_interval_seconds", 1.0)),
+                                     max_events_per_scene=int(rv.get("max_events_per_scene", 4)),
+                                     role=role_for(self.cfg, rf.path), meta_path=Path(local), log=self.log)
+                finally:
+                    mkv.unlink(missing_ok=True)
         finally:
             if not getattr(source, "is_local_passthrough", lambda: False)():
                 Path(local).unlink(missing_ok=True)  # 動画は大きいので読み終えたら消す（画面は保存済み）
         rec.update({"path": rf.path, "content_hash": rf.content_hash, "size": rf.size, "dir": str(d),
-                    "local_seconds": round(time.time() - t0, 1), "complete": True})
+                    "local_seconds": round(time.time() - t0, 1), "complete": True, "read_version": READ_VERSION})
+        rec.setdefault("role", role_for(self.cfg, rf.path))
         d.mkdir(parents=True, exist_ok=True)
         rec_path.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
         return rec
@@ -105,46 +137,95 @@ class Reader:
                 p["ocr"] = ocr_image(ocr, Path(p["render"]))
 
     # ---------- 3. AI の書き起こし ----------
-    def _ai_cached(self, rec: dict, item_key: str, build) -> dict | None:
+    def _ai_cached(self, rec: dict, item_key: str, build, provider=None) -> dict | None:
+        """AI の結果をファイルに保存し、同じ資料・同じ項目なら呼び直さない（失敗は未照合として残る）。"""
+        provider = provider or self.provider
         path = Path(rec["dir"]) / "ai" / f"{item_key}.json"
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))["data"]
-        if self.provider is None:
+        if provider is None:
             return None
         limit = self.cfg.data.get("reading", {}).get("max_ai_calls")
-        if limit and self.usage["calls"] >= int(limit):
-            return None
+        with self.lock:
+            if limit and self.usage["calls"] >= int(limit):
+                return None
+            self.usage["calls"] += 1
         req = build()
         try:
-            resp = self.provider.analyze(req)
+            resp = provider.analyze(req)
         except Exception as e:  # noqa: BLE001  1件の失敗で全体を止めない（未照合として残る）
-            self.usage["failed"] += 1
+            with self.lock:
+                self.usage["failed"] += 1
+                self.usage["calls"] -= 1
             self.log(f"  AI の読み取りに失敗（{req.source_label}）: {type(e).__name__}: {str(e)[:200]}")
             return None
-        self.usage["calls"] += 1
-        self.usage["input_tokens"] += resp.input_tokens
-        self.usage["output_tokens"] += resp.output_tokens
+        with self.lock:
+            self.usage["input_tokens"] += resp.input_tokens
+            self.usage["output_tokens"] += resp.output_tokens
+            m = self.usage["by_model"].setdefault(resp.model or getattr(provider, "model", "?"),
+                                                  {"calls": 0, "input_tokens": 0, "output_tokens": 0})
+            m["calls"] += 1
+            m["input_tokens"] += resp.input_tokens
+            m["output_tokens"] += resp.output_tokens
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"model": resp.model, "input_tokens": resp.input_tokens,
                                     "output_tokens": resp.output_tokens, "data": resp.data},
                                    ensure_ascii=False, indent=1), encoding="utf-8")
         return resp.data
 
+    def _parallel(self, jobs: list) -> None:
+        workers = max(1, int(self.cfg.data.get("reading", {}).get("ai_workers", 4)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(lambda f: f(), jobs))
+
     def ai_read(self, rec: dict) -> None:
         label = rec["path"]
+        role = rec.get("role") or {}
         if rec["kind"] == "pdf":
-            for p in rec["pages"]:
-                p["ai"] = self._ai_cached(rec, f"page_{p['page']:03d}", lambda p=p: ai_read.pdf_page_request(label, p))
-        else:
-            for sc in rec["scenes"]:
-                if sc.get("same_as") is not None:
-                    continue
-                sc["ai"] = self._ai_cached(rec, f"scene_{sc['index']:04d}",
-                                           lambda sc=sc: ai_read.video_scene_request(label, sc, fmt_time))
-            for sc in rec["scenes"]:
-                if sc.get("same_as") is not None:
-                    sc["ai"] = rec["scenes"][sc["same_as"]].get("ai")
-            self._fix_speech(rec)
+            def page_job(p):
+                def run():
+                    p["ai"] = self._ai_cached(rec, f"page_{p['page']:03d}",
+                                              lambda: ai_read.pdf_page_request(label, p))
+                    p["ai_model"] = "main"
+                    # 照合で要確認なら上位モデルで読み直す（同じ項目は保存済みを使い、呼び直さない）
+                    if self.escalation is not None and p["ai"] is not None and \
+                            verify.verify_pdf_page(p, p["ai"])["status"] == "needs_review":
+                        up = self._ai_cached(rec, f"page_{p['page']:03d}_x", lambda: ai_read.pdf_page_request(label, p),
+                                             provider=self.escalation)
+                        if up is not None:
+                            p["ai_main"], p["ai"], p["ai_model"] = p["ai"], up, "escalated"
+                return run
+            self._parallel([page_job(p) for p in rec["pages"]])
+            return
+        uniq = [sc for sc in rec["scenes"] if sc.get("same_as") is None]
+        ref = next((sc["frame"] for sc in rec["scenes"] if sc.get("mode") == "experiment"), None)
+        who = role.get("who", "")
+
+        def scene_job(sc):
+            def run():
+                if sc.get("mode") == "experiment":
+                    build = lambda: ai_read.experiment_window_request(label, sc, fmt_time, ref, who)  # noqa: E731
+                else:
+                    build = lambda: ai_read.video_scene_request(label, sc, fmt_time)  # noqa: E731
+                sc["ai"] = self._ai_cached(rec, f"scene_{sc['index']:04d}", build)
+                sc["ai_model"] = "main"
+                if self.escalation is None or sc["ai"] is None:
+                    return
+                if sc.get("mode") == "experiment":
+                    hard = sc["ai"].get("face") == "unknown" and role.get("faces")
+                else:
+                    hard = verify.verify_video_scene(sc, sc["ai"])["status"] == "needs_review" or bool(sc["ai"].get("unreadable"))
+                if hard:
+                    up = self._ai_cached(rec, f"scene_{sc['index']:04d}_x", build, provider=self.escalation)
+                    if up is not None:
+                        sc["ai_main"], sc["ai"], sc["ai_model"] = sc["ai"], up, "escalated"
+            return run
+        self._parallel([scene_job(sc) for sc in uniq])
+        for sc in rec["scenes"]:
+            if sc.get("same_as") is not None:
+                src = rec["scenes"][sc["same_as"]]
+                sc["ai"], sc["ai_model"] = src.get("ai"), src.get("ai_model")
+        self._fix_speech(rec)
 
     def _fix_speech(self, rec: dict) -> None:
         """文字起こしの専門用語の誤認識を、資料（スライドの書き起こし・OCR・PDF）の用語を根拠に訂正する。"""
@@ -208,12 +289,13 @@ class Reader:
 
 
 def run_reading(cfg, *, only: list[str] | None = None, allow_ai: bool = False, provider=None,
-                out_dir: Path | None = None, log=print, source=None, transcriber=None) -> dict:
+                out_dir: Path | None = None, log=print, source=None, transcriber=None, escalation=None) -> dict:
     from ..sources import make_source
     from .report import write_reports
 
     source = source or make_source(cfg)
-    reader = Reader(cfg, out_dir=out_dir, provider=provider if allow_ai else None, log=log)
+    reader = Reader(cfg, out_dir=out_dir, provider=provider if allow_ai else None,
+                    escalation=escalation if allow_ai else None, log=log)
     files = list(source.iter_files())
     items = reader.inventory(files)
     by_path = {f.path: f for f in files}
@@ -235,19 +317,27 @@ def run_reading(cfg, *, only: list[str] | None = None, allow_ai: bool = False, p
     reader.pdf_vocab = "\n".join(p["text_layer"] for r in ok.values() if r["kind"] == "pdf" for p in r["pages"])
     est = ai_read.estimate_calls(ok)
     if allow_ai and reader.provider is not None:
-        for rec in ok.values():
-            reader.ai_read(rec)
+        for path, rec in ok.items():
+            # --only のときは指定した資料だけ AI で読む（PDF は照合・用語のためにどのジョブでも読むが、AI は PDF のジョブだけ）
+            if not only or any(o in path for o in only):
+                reader.ai_read(rec)
     reader.verify(ok)
     summary = write_reports(cfg, reader.out, items, records, est, reader.usage, ai_enabled=reader.provider is not None)
+    if not only:  # 全資料を読んだときは、資料をまたぐ整理（重複・差分、実験経過の時間軸、先生と生徒の対応）も行う
+        from .corpus import analyze_corpus
+        analyze_corpus(cfg, reader.out, items, ok, provider=escalation or provider if allow_ai else None, log=log)
     return summary
 
 
-def list_targets(cfg, source) -> list[str]:
-    """並列実行の単位: 動画・音声は1件ずつ。PDF はどのジョブでも読むので、動画が無いときだけ1ジョブにする。"""
+def list_targets(cfg, source, with_hash: bool = False) -> list:
+    """並列実行の単位: 資料1件ずつ（PDF はどのジョブでもローカルに読むが、AI で読むのはその PDF のジョブだけ）。
+    with_hash=True なら [{"path", "key"}]（key は内容のハッシュと読み取り方法の版。保存済みの結果を使い直すため）。"""
     items = build_inventory(list(source.iter_files()), list(cfg.data["stability"]["ignore_patterns"]))
     mats = [i for i in items if i.role == "material" and i.kind in READ_KINDS]
-    vids = [i.path for i in sorted(mats, key=lambda i: -i.size) if i.kind != "pdf"]
-    return vids or ([mats[0].path] if mats else [])
+    chosen = sorted(mats, key=lambda i: (i.kind == "pdf", -i.size))
+    if not with_hash:
+        return [i.path for i in chosen]
+    return [{"path": i.path, "key": f"v{READ_VERSION}-{(i.content_hash or '')[:16]}"} for i in chosen]
 
 
 def _make_transcriber(cfg, pdf_records: list[dict], log):

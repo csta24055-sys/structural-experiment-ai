@@ -46,6 +46,20 @@ def _ai_md(ai: dict | None) -> list[str]:
     return out
 
 
+def _experiment_md(ai: dict) -> list[str]:
+    out = [f"- 面: {ai.get('face')}（{ai.get('face_evidence', '')}） 視点: {ai.get('view', '')}",
+           f"- 試験体: {ai.get('specimen_state', '')}"]
+    out += [f"- ひび割れ: {c['location']} / {c['direction']} / {c['change']}" for c in ai.get("cracks", [])]
+    if ai.get("loading"):
+        out.append(f"- 加力: {ai['loading']}")
+    out += [f"- 表示: {x['what']} = {x['value']}" + ("（概算）" if x.get("approx") else "") for x in ai.get("readings", [])]
+    out += [f"- 操作: {a}" for a in ai.get("actions", [])]
+    if ai.get("visible_text"):
+        out.append(f"- 映っている文字: {ai['visible_text']}")
+    out += [f"- 不確実: {u}" for u in ai.get("uncertain", [])]
+    return out
+
+
 def _pdf_md(rec: dict) -> str:
     lines = [f"# {rec['path']}", "", f"PDF {rec['n_pages']} ページ。文字はテキスト層（正確）、図・写真・グラフはAIの読み取り＋照合。", ""]
     for p, v in zip(rec["pages"], rec["verification"]):
@@ -68,6 +82,15 @@ def _video_md(rec: dict) -> str:
              f"発話 {len(rec['speech'])} 区間（{rec.get('transcriber', '文字起こしなし')}）",
              "資料の領域: " + (f"{rec['region']['w']}x{rec['region']['h']}（画面録画の時計・ツールバーを除いて切り出し）"
                           if rec.get("region_cropped") else "画面全体"), ""]
+    au = rec.get("audio") or {}
+    if au.get("track_seconds") is not None and au["track_seconds"] < rec["duration"] - 1:
+        lines += [f"音声: {fmt_time(au['track_seconds'])} までしか録音されていない（以降は画面だけを読む。文字起こしは作らない）", ""]
+    if rec.get("orientation_changes"):
+        lines += ["画面の向き・大きさの変化: " + "、".join(fmt_time(c) for c in rec["orientation_changes"]), ""]
+    if (rec.get("trim") or {}).get("status"):
+        t = rec["trim"]
+        lines += [f"末尾の除外: {t['status']}" + (f"。{fmt_time(t['trim_at'])} 以降は解析していない" if t.get("trim_at") else "")
+                  + f"。根拠: {(t.get('evidence') or {}).get('reason', '')}", ""]
     if rec.get("speech_fix"):
         f = rec["speech_fix"]
         lines += [f"文字起こしの専門用語の訂正: 適用 {f['applied']} 件（資料の用語で根拠を確認したものだけ）、"
@@ -84,7 +107,10 @@ def _video_md(rec: dict) -> str:
             m = sc["pdf_match"]
             lines.append(f"- 対応するPDF: {m['file']} p.{m['page']}（一致度 {m['similarity']}）")
         if sc.get("same_as") is None:
-            if sc.get("ai"):
+            if sc.get("ai") and sc.get("mode") == "experiment":
+                lines += [f"### 映像の読み取り（AI{'・上位モデルで再読' if sc.get('ai_model') == 'escalated' else ''}）",
+                          *_experiment_md(sc["ai"])]
+            elif sc.get("ai"):
                 lines += ["### 画面の書き起こし（AI）", *_ai_md(sc["ai"])]
             lines += ["### 画面のOCR（ローカル・誤りを含む）", "```", (sc.get("ocr") or "（なし）")[:2000], "```"]
         if sc.get("events"):
@@ -103,8 +129,15 @@ def _video_md(rec: dict) -> str:
 def write_reports(cfg, out: Path, items, records: dict, est: dict, usage: dict, *, ai_enabled: bool) -> dict:
     ai_cfg = cfg.data["ai"]
     pin, pout = float(ai_cfg.get("price_input_per_mtok", 0)), float(ai_cfg.get("price_output_per_mtok", 0))
-    cost = est["input_tokens"] / 1e6 * pin + est["output_tokens"] / 1e6 * pout
-    summary: dict = {"files": [], "estimate": {**est, "usd": round(cost, 2)}, "ai_usage": usage, "ai_enabled": ai_enabled}
+    main_cost = est["input_tokens"] / 1e6 * pin + est["output_tokens"] / 1e6 * pout
+    esc = est.get("escalation") or {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+    xin = float(ai_cfg.get("escalation_price_input_per_mtok", 0))
+    xout = float(ai_cfg.get("escalation_price_output_per_mtok", 0))
+    esc_cost = (esc["input_tokens"] / 1e6 * xin + esc["output_tokens"] / 1e6 * xout) if ai_cfg.get("escalation_model") else 0.0
+    cost = main_cost + esc_cost
+    summary: dict = {"files": [], "estimate": {**est, "usd": round(cost, 2), "usd_main": round(main_cost, 2),
+                                               "usd_escalation": round(esc_cost, 2)},
+                     "ai_usage": usage, "ai_enabled": ai_enabled}
     counts = {"ok": 0, "needs_review": 0, "unverified": 0, "text_only": 0}
     for path, rec in records.items():
         entry = {"path": path, "kind": rec.get("kind")}
@@ -129,7 +162,10 @@ def write_reports(cfg, out: Path, items, records: dict, est: dict, usage: dict, 
                           "unique_scenes": rec.get("n_unique_scenes"), "speech_segments": len(rec["speech"]),
                           "low_conf_speech": sum((s.get("avg_logprob") or 0) < -1.0 for s in rec["speech"]),
                           "region_cropped": rec.get("region_cropped"), "ocr_vs_pdf": rec.get("ocr_vs_pdf"),
-                          "pdf_linked_scenes": sum(1 for s in rec["scenes"] if s.get("pdf_match"))})
+                          "pdf_linked_scenes": sum(1 for s in rec["scenes"] if s.get("pdf_match")),
+                          "valid_end": rec.get("valid_end"), "trim": rec.get("trim"), "role": rec.get("role"),
+                          "audio_seconds": (rec.get("audio") or {}).get("track_seconds"),
+                          "orientation_changes": rec.get("orientation_changes")})
         summary["files"].append(entry)
     summary["status_counts"] = counts
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -147,13 +183,20 @@ def write_reports(cfg, out: Path, items, records: dict, est: dict, usage: dict, 
                       f"発話 {e['speech_segments']} 区間（信頼度低 {e['low_conf_speech']}）、PDFと対応する場面 {e['pdf_linked_scenes']}"
                       + (f"、OCR実測 {e['ocr_vs_pdf']['mean_line_coverage']:.0%}" if e.get("ocr_vs_pdf") else "")
                       + f" 状態 {e['status']}")
+            if (e.get("trim") or {}).get("status"):
+                t = e["trim"]
+                md.append(f"  - 末尾の除外: {t['status']}" + (f"（{fmt_time(t['trim_at'])} 以降を除外）" if t.get("trim_at") else "")
+                          + f" 根拠: {(t.get('evidence') or {}).get('reason', '')}")
     md += ["", "## AI の読み取り（有料）", "",
            f"必要な呼び出し {est['total_calls']} 回（PDFのページ {est['calls']['pdf_page']}、動画の場面 {est['calls']['video_scene']}、"
-           f"操作を含む場面 {est['calls']['video_ops']}、文字起こしの用語訂正 {est['calls']['speech_fix']}）、画像 {est['images']} 枚",
-           f"概算: 入力 {est['input_tokens']:,} トークン・出力 {est['output_tokens']:,} トークン → 約 ${cost:.2f}"
+           f"操作を含む場面 {est['calls']['video_ops']}、実験経過の区間 {est['calls'].get('experiment_window', 0)}、"
+           f"文字起こしの用語訂正 {est['calls']['speech_fix']}）、画像 {est['images']} 枚",
+           f"概算（{ai_cfg.get('model')}）: 入力 {est['input_tokens']:,} トークン・出力 {est['output_tokens']:,} トークン → 約 ${main_cost:.2f}"
            f"（単価 入力 ${pin}/100万・出力 ${pout}/100万。実際は画像の大きさ・出力量で前後する）",
+           f"上位モデルでの読み直しの見込み（{ai_cfg.get('escalation_model') or '使わない'}）: {esc['calls']} 回 → 約 ${esc_cost:.2f}。"
+           f"合計 約 ${cost:.2f}",
            f"今回の実行: AI {'あり' if ai_enabled else 'なし（見積もりのみ）'}、呼び出し {usage['calls']} 回、失敗 {usage['failed']} 回、"
            f"入力 {usage['input_tokens']:,}・出力 {usage['output_tokens']:,} トークン"]
     (out / "summary.md").write_text("\n".join(md) + "\n", encoding="utf-8")
-    (out / "estimate.md").write_text("\n".join(md[-4:]) + "\n", encoding="utf-8")
+    (out / "estimate.md").write_text("\n".join(md[-5:]) + "\n", encoding="utf-8")
     return summary

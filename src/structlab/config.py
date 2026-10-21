@@ -76,6 +76,10 @@ DEFAULTS: dict[str, Any] = {
         # 概算費用の計算用（USD / 100万トークン）。料金は変わるので公式の料金表で確認すること
         "price_input_per_mtok": 4.0,
         "price_output_per_mtok": 20.0,
+        # 複雑な部分だけを読み直す上位モデル（空なら使わない）と概算費用の単価
+        "escalation_model": "",
+        "escalation_price_input_per_mtok": 10.0,
+        "escalation_price_output_per_mtok": 50.0,
     },
     "semantic": {
         # 規則による指示抽出・照合・関連付け（AI不使用・常に安全）
