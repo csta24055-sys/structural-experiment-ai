@@ -48,11 +48,33 @@ def role_for(cfg, path: str) -> dict:
 
 def remux(src: Path, dest: Path) -> Path:
     """映像・音声をそのまま（再圧縮せずに）MKV に入れ直す。目次の不完全な録画で、途中の画面の取り出しが
-    先頭からの読み直しになり極端に遅くなるのを防ぐ（内容は変わらない）。"""
+    先頭からの読み直しになり極端に遅くなるのを防ぐ（内容は変わらない）。
+    iPhone のカメラ動画には MKV に入れられない音声（空間オーディオ等）があるので、普通の音声トラックを1本だけ入れる。
+    入れ直せない場合は元のファイルをそのまま使う（遅いが内容は同じ）。"""
     from .. import media
-    media._run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a?",
-                "-c", "copy", str(dest)], timeout=3600)
-    return dest
+    audio = _plain_audio_index(src)
+    amap = ["-map", f"0:{audio}"] if audio is not None else []
+    try:
+        media._run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", *amap,
+                    "-c", "copy", str(dest)], timeout=3600)
+        return dest
+    except media.MediaError:
+        dest.unlink(missing_ok=True)
+        return src
+
+
+def _plain_audio_index(src: Path) -> int | None:
+    """ffmpeg で扱える最初の音声トラックの番号（無ければ None）。"""
+    from .. import media
+    try:
+        out = media._run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index,codec_name",
+                          "-of", "json", str(src)], timeout=120).stdout
+    except media.MediaError:
+        return None
+    for st in json.loads(out).get("streams", []):
+        if st.get("codec_name") in ("aac", "mp3", "alac", "pcm_s16le", "pcm_s24le", "pcm_f32le", "opus", "ac3", "eac3", "flac"):
+            return int(st["index"])
+    return None
 
 
 def vocabulary(pdf_records: list[dict], base: str = "", limit: int = 60) -> str:
@@ -116,7 +138,8 @@ class Reader:
                                      max_events_per_scene=int(rv.get("max_events_per_scene", 4)),
                                      role=role_for(self.cfg, rf.path), meta_path=Path(local), log=self.log)
                 finally:
-                    mkv.unlink(missing_ok=True)
+                    if mkv != Path(local):
+                        mkv.unlink(missing_ok=True)
         finally:
             if not getattr(source, "is_local_passthrough", lambda: False)():
                 Path(local).unlink(missing_ok=True)  # 動画は大きいので読み終えたら消す（画面は保存済み）

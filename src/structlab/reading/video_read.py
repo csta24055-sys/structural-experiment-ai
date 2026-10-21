@@ -314,7 +314,7 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
                interval: float = 1.0, max_events_per_scene: int = 4, frame_width: int = 1800,
                asr_chunk: float = 600.0, role: dict | None = None, meta_path: Path | None = None, log=print) -> dict:
     """role: {"kind": "experiment", "window": 15, "trim_end": True} など（資料の役割。configs の reading.roles）
-    meta_path: 元のファイル（path が入れ直した MKV のとき）。長さ・音声トラックの長さ・無音は元のファイルで測る"""
+    meta_path: 元のファイル（path が入れ直した MKV のとき）。録画の長さは元のファイルで測る"""
     role = role or {}
     out_dir.mkdir(parents=True, exist_ok=True)
     meta = Path(meta_path or path)
@@ -345,7 +345,7 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
         rec["region_cropped"] = any(s["region_cropped"] for s in segs)
     else:
         segs = []
-    audio = audio_profile(meta, info, info.duration)
+    audio = audio_profile(path, info, info.duration)  # 入れ直した MKV には扱える音声だけが入っている
     rec["audio"] = audio
     if role.get("trim_end") and sampled_all:
         seg0 = [(t, f) for t, f, si in sampled_all if si == sampled_all[0][2]]
