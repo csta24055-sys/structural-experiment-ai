@@ -170,21 +170,27 @@ class Reader:
         """AI の結果をファイルに保存し、同じ資料・同じ項目なら呼び直さない（失敗は未照合として残る）。"""
         provider = provider or self.provider
         path = Path(rec["dir"]) / "ai" / f"{item_key}.json"
+        req = None
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))["data"]
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if "req_hash" not in saved:
+                return saved["data"]  # 指紋の記録より前の結果（内容は同じ版の依頼）
+            req = build()
+            if req is None or saved["req_hash"] == request_hash(req):
+                return saved["data"]  # 今送るのと全く同じ依頼の結果だけを使い直す
         if provider is None:
             return None
         if self.batch:  # まとめて送る（Batch API）: ここでは依頼を集めるだけ。結果は保存され、次の周回で読まれる
             with self.lock:
                 if str(path) not in {str(x[0]) for x in self.pending}:
-                    self.pending.append((path, build()))
+                    self.pending.append((path, req or build()))
             return None
         limit = self.cfg.data.get("reading", {}).get("max_ai_calls")
         with self.lock:
             if limit and self.usage["calls"] >= int(limit):
                 return None
             self.usage["calls"] += 1
-        req = build()
+        req = req or build()
         try:
             resp = provider.analyze(req)
         except Exception as e:  # noqa: BLE001  1件の失敗で全体を止めない（未照合として残る）
@@ -203,7 +209,7 @@ class Reader:
             m["output_tokens"] += resp.output_tokens
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"model": resp.model, "input_tokens": resp.input_tokens,
-                                    "output_tokens": resp.output_tokens, "data": resp.data},
+                                    "output_tokens": resp.output_tokens, "req_hash": request_hash(req), "data": resp.data},
                                    ensure_ascii=False, indent=1), encoding="utf-8")
         return resp.data
 
@@ -249,7 +255,7 @@ class Reader:
             m["output_tokens"] += res.output_tokens
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"model": res.model, "input_tokens": res.input_tokens,
-                                        "output_tokens": res.output_tokens, "batch": True,
+                                        "output_tokens": res.output_tokens, "batch": True, "req_hash": request_hash(req),
                                         "cache_read_tokens": getattr(res, "cache_read_tokens", 0), "data": res.data},
                                        ensure_ascii=False, indent=1), encoding="utf-8")
         return len(pending)
@@ -472,6 +478,24 @@ def run_reading(cfg, *, only: list[str] | None = None, allow_ai: bool = False, p
     return summary
 
 
+def request_hash(req) -> str:
+    """依頼の指紋（指示文・本文・出力の形・画像の中身）。同じ指紋の保存済みの結果だけを使い直す。"""
+    h = hashlib.sha256()
+    g = lambda k, d=None: getattr(req, k, d)  # noqa: E731
+    for part in (g("system") or "", g("text") or "", json.dumps(g("schema"), sort_keys=True, ensure_ascii=False),
+                 str(g("max_tokens")), str(g("cache_prefix_chars", 0)), str(g("source_label", ""))):
+        h.update(part.encode())
+        h.update(b"\0")
+    for im in g("images", []) or []:
+        h.update(str(im.label).encode())
+        h.update(str(getattr(im, "lossless", False)).encode())
+        try:
+            h.update(hashlib.sha256(Path(im.path).read_bytes()).digest())
+        except OSError:
+            h.update(b"missing")
+    return h.hexdigest()[:32]
+
+
 def all_requests(rec: dict, vocab: str = "") -> list:
     """資料1件で AI に送る依頼をすべて組み立てる（送らない）。入力トークンの実測（count_tokens）に使う。"""
     label = rec["path"]
@@ -535,7 +559,13 @@ def list_targets(cfg, source, with_hash: bool = False) -> list:
     chosen = sorted(mats, key=lambda i: (i.kind == "pdf", -i.size))
     if not with_hash:
         return [i.path for i in chosen]
-    return [{"path": i.path, "key": f"v{READ_VERSION}-{(i.content_hash or '')[:16]}"} for i in chosen]
+    return [{"path": i.path, "base": f"v{READ_VERSION}-{(i.content_hash or '')[:16]}",
+             "key": f"v{READ_VERSION}-{(i.content_hash or '')[:16]}-{role_key(cfg, i.path)}"} for i in chosen]
+
+
+def role_key(cfg, path: str) -> str:
+    """資料の役割の設定の指紋。役割の設定を変えた資料だけを読み直す（他の資料の保存済みの読み取りはそのまま使う）。"""
+    return hashlib.sha1(json.dumps(role_for(cfg, path), sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:8]
 
 
 def _make_transcriber(cfg, pdf_records: list[dict], log, model: str | None = None):

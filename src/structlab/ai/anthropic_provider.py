@@ -11,6 +11,9 @@ from .base import AIError, AIProvider, AIRequest, AIResponse
 from .prompts import OUTPUT_SCHEMA, SYSTEM_PROMPT, build_user_text
 
 
+#: キャッシュ（既定の 5 分）。Batch の中ではキャッシュに当たるかは保証されないので、外れたときの割増が小さい
+#: 5 分（書き込み 1.25 倍）にする。1 時間（書き込み 2 倍）は当たる割合が高いと実測で分かってから検討する。内容には影響しない
+CACHE = {"type": "ephemeral"}
 MAX_IMAGE_BYTES = 3_700_000  # API の上限（1枚 5MB、base64 で 4/3 倍になる）に収める
 
 
@@ -59,10 +62,15 @@ class AnthropicProvider(AIProvider):
             content.append({"type": "text", "text": f"[画像: {img.label}]"})
             block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": data}}
             if getattr(img, "cache", False):
-                block["cache_control"] = {"type": "ephemeral"}
+                block["cache_control"] = dict(CACHE)
             content.append(block)
         if req.schema is not None:  # 意味理解層: 本文は呼び出し側で組み立て済み
-            content.append({"type": "text", "text": req.text})
+            k = int(getattr(req, "cache_prefix_chars", 0) or 0)
+            if 0 < k < len(req.text):
+                content.append({"type": "text", "text": req.text[:k], "cache_control": dict(CACHE)})
+                content.append({"type": "text", "text": req.text[k:]})
+            else:
+                content.append({"type": "text", "text": req.text})
         else:
             content.append({"type": "text", "text": build_user_text(req.task, req.source_label, req.text)})
         return content
@@ -72,7 +80,7 @@ class AnthropicProvider(AIProvider):
         return dict(
             model=self.model,
             max_tokens=req.max_tokens or self.max_tokens,
-            system=[{"type": "text", "text": req.system or SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            system=[{"type": "text", "text": req.system or SYSTEM_PROMPT, "cache_control": dict(CACHE)}],
             messages=[{"role": "user", "content": self._content(req)}],
             output_config={"effort": self.effort,
                            "format": {"type": "json_schema", "schema": req.schema or OUTPUT_SCHEMA}},

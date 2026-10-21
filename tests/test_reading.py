@@ -690,3 +690,78 @@ def test_detail_estimate_does_not_write_images(tmp_path):
     plan = ai_read.plan_requests(rec)
     assert plan[0][0] == "video_detail2" and plan[0][1] > 3 * (800 * 480 // 750)
     assert not (tmp_path / "derived").exists()          # 見積もりでは拡大画像を作らない
+
+
+def test_saved_ai_result_is_reused_only_for_the_identical_request(tmp_path):
+    """保存済みの AI の結果は、今送るのと全く同じ依頼（本文・指示・画像の中身）のときだけ使い直す。"""
+    from structlab.ai.base import AIRequest
+    from structlab.reading.runner import Reader
+    cfg = make_cfg(tmp_path, tmp_path)
+    calls = []
+
+    class P:
+        model = "m"
+
+        def analyze(self, req):
+            calls.append(req.text)
+            return AIResponse(data={"t": req.text}, model="m", input_tokens=1, output_tokens=1, raw_text="")
+    r = Reader(cfg, out_dir=tmp_path / "o", provider=P(), log=lambda m: None)
+    rec = {"dir": str(tmp_path / "rec")}
+    mk = lambda t: (lambda: AIRequest(task="x", source_label="s", text=t, system="sys", schema={"a": 1}))  # noqa: E731
+    assert r._ai_cached(rec, "k", mk("A")) == {"t": "A"}
+    assert r._ai_cached(rec, "k", mk("A")) == {"t": "A"} and calls == ["A"]      # 同じ依頼は送らない
+    assert r._ai_cached(rec, "k", mk("B")) == {"t": "B"} and calls == ["A", "B"]  # 中身が変われば送り直す
+
+
+def test_compact_material_keeps_every_key_and_value():
+    """候補「短い書き方」: すべてのキー・値（数値・式・記号・空の値）が順序どおりに残る。"""
+    from structlab.reading.semantic_bridge import compact
+    ai = {"title": "荷重-変形関係", "text_blocks": [{"text": "P = 2Q", "role": "body"}, {"text": "δ=1.58", "role": "label"}],
+          "tables": [{"caption": "", "header": ["班", "P(kN)"], "rows": [["1", "97.2"], ["2", "76.2"]], "notes": ""}],
+          "formulas": [{"latex": "\\\\delta_{sc}=P_{sc}/K_E", "plain": "δsc = Psc / KE", "where": ""}],
+          "operations": [], "unreadable": [{"where": "右下", "reason": "通知で隠れている"}], "notes": "a\nb",
+          "zoom_requests": [], "flag": True, "n": 0, "none": None}
+    text = compact(ai)
+
+    def leaves(x, path=""):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                yield k
+                yield from leaves(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from leaves(v)
+        else:
+            yield x
+    pos = -1
+    for leaf in leaves(ai):
+        s = {None: "null", True: "true", False: "false"}.get(leaf, leaf) if not isinstance(leaf, (int, float)) or isinstance(leaf, bool) else str(leaf)
+        s = str(s).replace("\n", "\\n")
+        if s == "":
+            continue
+        i = text.find(s, pos + 1 if isinstance(leaf, str) and leaf in ai else 0)
+        assert i >= 0, s
+    assert len(text) < len(__import__("json").dumps(ai, ensure_ascii=False))
+
+
+def test_candidate_options_keep_results_with_mock(tmp_path):
+    """候補（照合のまとめ・先頭配置・短い書き方）を入れても、Mock では同じ指示・同じ判定になる（仕組みの確認。
+    実際の AI での品質の同等性は pilot で確かめるまで未検証）。"""
+    from structlab.ai.mock_provider import MockProvider
+    from structlab.reading.semantic_bridge import run_semantic
+    rec = {"path": "e.mp4", "kind": "video", "duration": 250.0, "has_audio": True, "content_hash": "h", "transcriber": "x",
+           "scenes": [{"index": 0, "start": 0, "end": 250, "frame_time": 1, "frame": "", "mode": "slides",
+                       "ai": {"title": "t", "text_blocks": [{"text": "単位は必ず書くこと", "role": "body"}]}}],
+           "speech": [{"start": 5.0, "end": 8.0, "text": "グラフには必ず軸ラベルを書いてください"},
+                      {"start": 20.0, "end": 23.0, "text": "連続コピーは絶対にしないでください"},
+                      {"start": 130.0, "end": 133.0, "text": "考察は自分の言葉で書いてください"}]}
+    out = {}
+    for name, opts in (("base", {}), ("cand", {"verify_group": 5, "cache_layout": "prefix"})):
+        cfg = make_cfg(tmp_path, tmp_path)
+        cfg.data["semantic"].update({"ai": True, **opts})
+        if name == "cand":
+            cfg.data.setdefault("reading", {})["semantic_material"] = "compact"
+        run_semantic(cfg, tmp_path / name, {rec["path"]: rec}, MockProvider(), batch=False, log=lambda m: None)
+        d = json.loads((tmp_path / name / "semantic" / "directives.json").read_text(encoding="utf-8"))
+        out[name] = sorted((x["class"], x["content"], x["verification"]) for x in d)
+    assert out["base"] == out["cand"] and out["base"]

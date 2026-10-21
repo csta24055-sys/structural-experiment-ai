@@ -267,6 +267,19 @@ def check_auto(name: str, c: Ctx) -> tuple[str, str]:
         exp = [r for r in roles if r.get("kind") == "experiment"]
         ok = rd.get("batch") and exp and all(int(r.get("group", 1)) == 4 and float(r.get("window", 15)) == 15 for r in exp)
         return _ok(bool(ok), "Batch API・実験区間 15 秒（3 枚）×4 区間まとめ・切り出しの構成", "2,350円構成の設定と違う")
+    if name == "candidates_gated":
+        sem = c.cfg.data.get("semantic", {})
+        on = [k for k, v in (("semantic.cache_layout", sem.get("cache_layout") == "prefix"),
+                             ("semantic.verify_group", int(sem.get("verify_group", 1)) > 1),
+                             ("reading.semantic_material", c.cfg.data.get("reading", {}).get("semantic_material") == "compact"))
+              if v]
+        if on and not (c.corpus and list(Path(c.corpus).rglob("pilot_decision.json"))):
+            return "不一致", f"品質の比較（pilot）の記録が無いのに候補が有効: {on}"
+        return "成功", "品質の比較で確かめていない候補は無効（今の方式のまま）" if not on else f"pilot で採用と判定された候補: {on}"
+    if name == "cost_tracking":
+        ok = bool(c.corpus and (Path(c.corpus) / "costs" / "costs.json").exists())
+        return ("成功", "工程・依頼の種類ごとの費用と最適化ごとの効果を costs.json に記録") if ok else \
+            ("未検証", "costs.json が無い（structlab cost を実行していない）")
     if name == "notifications_excluded":
         return "要確認", "指示文で通知の書き起こしを禁止（仕組み）。出力ごとに通知が含まれていないかは人が確認"
     return "未検証", f"自動の確認 {name} は未実装"

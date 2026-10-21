@@ -69,6 +69,8 @@ class SemanticEngine:
         self.max_attempts = int(cfg.data["limits"]["max_attempts"])
         self.max_images = int(cfg.data["ai"]["max_images_per_call"])
         self.ai_stopped: str | None = None
+        #: 候補の最適化（資料全体の理解を先頭に置いてキャッシュ）。品質の比較で同等と確認できたときだけ true にする
+        self.prefix_layout = self.sc.get("cache_layout") == "prefix"
 
     @property
     def ai_active(self) -> bool:
@@ -500,16 +502,22 @@ class SemanticEngine:
                 self.checkpoint()
                 prev = self._latest(did, scenes[i - 1].unit_id) if i > 0 else None
                 nxt = self._latest(did, scenes[i + 1].unit_id) if i + 1 < len(scenes) else None
-                text = (f"{P.REINTERPRET_INSTRUCTION}\n## 資料\n{frow['path']}\n## 対象場面 #{sc.seq} {sc.where()}\n"
-                        f"### 元の発話・画面\n{_clip(lines_text(sc.lines), 15000)}\n"
-                        f"### この場面の現在の解釈\n```json\n{_j(cur)}\n```\n"
-                        f"## 資料全体の理解\n```json\n{self._global_brief(g)}\n```\n"
-                        f"## 直前の場面の解釈\n{self._brief(prev) or '（なし）'}\n## 直後の場面の解釈\n{self._brief(nxt) or '（なし）'}\n")
+                glob = f"## 資料全体の理解\n```json\n{self._global_brief(g)}\n```\n"
+                scene_part = (f"## 対象場面 #{sc.seq} {sc.where()}\n"
+                              f"### 元の発話・画面\n{_clip(lines_text(sc.lines), 15000)}\n"
+                              f"### この場面の現在の解釈\n```json\n{_j(cur)}\n```\n")
+                tail = f"## 直前の場面の解釈\n{self._brief(prev) or '（なし）'}\n## 直後の場面の解釈\n{self._brief(nxt) or '（なし）'}\n"
+                head = f"{P.REINTERPRET_INSTRUCTION}\n## 資料\n{frow['path']}\n"
+                if self.prefix_layout:  # 候補（品質の比較で同等と確かめるまで既定では使わない）: 資料全体の理解を先頭に置いてキャッシュ
+                    text, cache_k = head + glob + scene_part + tail, len(head + glob)
+                else:
+                    text, cache_k = head + scene_part + glob + tail, 0
                 imgs = [AIImage(p, lbl) for p, lbl in sc.images[:self.max_images]] if self.sc.get("reinterpret_images") else []
                 try:
                     r = self._ai(AIRequest(task="scene_reinterpret", source_label=f"{frow['path']} {sc.label}", text=text,
                                            images=imgs, t_start=sc.t_start, t_end=sc.t_end, system=P.COMMON_SYSTEM,
-                                           schema=P.REINTERPRET_SCHEMA), sc.unit_id)
+                                           schema=P.REINTERPRET_SCHEMA, cache_prefix_chars=0 if imgs else cache_k),
+                                 sc.unit_id)
                 except AIError as e:
                     self._mark(did, sc.unit_id, step, "failed", str(e))
                     continue
@@ -546,7 +554,8 @@ class SemanticEngine:
             for j in range(max(0, i - ctx_n), min(len(scenes), i + ctx_n + 1)):
                 if j != i:
                     around.append(f"#### 場面 #{scenes[j].seq} {scenes[j].where()}\n{_clip(lines_text(scenes[j].lines), 4000)}")
-            text = (f"{P.DIRECTIVE_INSTRUCTION}\n## 資料\n{frow['path']}\n## 資料全体の理解\n```json\n{self._global_brief(g)}\n```\n"
+            head = f"{P.DIRECTIVE_INSTRUCTION}\n## 資料\n{frow['path']}\n## 資料全体の理解\n```json\n{self._global_brief(g)}\n```\n"
+            text = (head +
                     f"## 対象場面 #{sc.seq} {sc.where()} の理解\n```json\n{_j(self._latest(did, sc.unit_id) or {})}\n```\n"
                     f"## 対象場面の元の発話・画面・資料\n{_clip(lines_text(sc.lines), 20000) or '（なし）'}\n"
                     f"### 抽出結果\n{_clip(sc.material, 10000)}\n"
@@ -556,7 +565,8 @@ class SemanticEngine:
             try:
                 r = self._ai(AIRequest(task="directive_extraction", source_label=f"{frow['path']} {sc.label}", text=text,
                                        images=imgs, t_start=sc.t_start, t_end=sc.t_end, system=P.COMMON_SYSTEM,
-                                       schema=P.DIRECTIVE_SCHEMA), sc.unit_id)
+                                       schema=P.DIRECTIVE_SCHEMA, cache_prefix_chars=0 if imgs else len(head)),
+                             sc.unit_id)
             except AIError as e:
                 self._mark(did, sc.unit_id, "directives", "failed", str(e))
                 self.db.log_error(run_id=self.run_id, stage="semantic:directives", message=str(e), file_id=frow["id"],
@@ -687,6 +697,7 @@ class SemanticEngine:
                                                     " AND status IN ('ok','failed_final')", (did,))}
         g = self._understanding(did)
         n = 0
+        todo = []
         for dir_id, issues in flagged:
             if dir_id in done_ids:  # sem_steps の unit_id 欄に指示IDを入れている（step='verify:<id>'）
                 continue
@@ -694,9 +705,22 @@ class SemanticEngine:
                 self.db.x("UPDATE directives SET verification='needs_review', verification_notes=? WHERE id=?",
                           (_j(issues + [f"照合の上限（semantic.max_verify_per_doc={cap}）のため再解析していない"]), dir_id))
                 continue
-            self.checkpoint()
             n += 1
-            self._verify_one(did, frow, scenes, dir_id, issues, g, local_path)
+            todo.append((dir_id, issues))
+        group = int(self.sc.get("verify_group", 1))
+        if group > 1:  # 候補: 同じ場面の指示をまとめて照合（既定では使わない）
+            by_unit: dict = {}
+            for dir_id, issues in todo:
+                u = self.db.q1("SELECT unit_id FROM directives WHERE id=?", (dir_id,))["unit_id"]
+                by_unit.setdefault(u, []).append((dir_id, issues))
+            for items in by_unit.values():
+                for k in range(0, len(items), group):
+                    self.checkpoint()
+                    self._verify_group(did, frow, scenes, items[k:k + group], g, local_path)
+        else:
+            for dir_id, issues in todo:
+                self.checkpoint()
+                self._verify_one(did, frow, scenes, dir_id, issues, g, local_path)
         # 場面ごとの照合状態（網羅率の計算用）
         for sc in scenes:
             rows = self.db.q("SELECT verification FROM directives WHERE doc_id=? AND unit_id=? AND effective NOT IN "
@@ -715,14 +739,20 @@ class SemanticEngine:
         extra_txt, images = self._reanalyze_media(frow, d, scenes, local_path, expand)
         target = {k: d[k] for k in ("content", "directive_class", "base_strength", "condition", "t_start", "t_end", "page",
                                     "speech", "target_task", "origin")}
-        text = (f"{P.VERIFY_INSTRUCTION}\n## 資料\n{frow['path']}\n## 確認対象\n```json\n{_j(target)}\n```\n"
+        head = f"{P.VERIFY_INSTRUCTION}\n## 資料\n{frow['path']}\n"
+        glob = f"## 資料全体の理解（参考）\n```json\n{self._global_brief(g)}\n```\n"
+        body = (f"## 確認対象\n```json\n{_j(target)}\n```\n"
                 f"## 指摘された問題点\n" + "\n".join(f"- {x}" for x in issues) +
                 f"\n## 元の発話・画面・資料（前後 {int(expand)} 秒／前後ページまで拡大）\n{_clip(lines_text(win), 20000) or '（なし）'}\n"
-                f"{extra_txt}\n## 資料全体の理解（参考）\n```json\n{self._global_brief(g)}\n```\n")
+                f"{extra_txt}\n")
+        if self.prefix_layout and not images:  # 候補（既定では使わない）
+            text, cache_k = head + glob + body, len(head + glob)
+        else:
+            text, cache_k = head + body + glob, 0
         try:
             r = self._ai(AIRequest(task="directive_verify", source_label=f"{frow['path']} 指示#{dir_id}", text=text,
                                    images=images, t_start=d["t_start"], t_end=d["t_end"], system=P.COMMON_SYSTEM,
-                                   schema=P.VERIFY_SCHEMA), d["unit_id"])
+                                   schema=P.VERIFY_SCHEMA, cache_prefix_chars=cache_k), d["unit_id"])
         except AIError as e:
             self._mark(did, dir_id, f"verify:{dir_id}", "failed", str(e))
             self.db.x("UPDATE directives SET verification='needs_review', verification_notes=? WHERE id=?",
@@ -773,6 +803,51 @@ class SemanticEngine:
                 seen.append(ln.frame)
                 images.append(AIImage(Path(ln.frame), f"{fmt_time(ln.t_start)} の画面"))
         return "（元動画が手元にないため、保存済みの画面と文字起こしで照合）", images[:self.max_images]
+
+    def _verify_group(self, did: int, frow, scenes: list[Scene], items: list, g: dict | None,
+                      local_path: Path | None) -> None:
+        """候補: 同じ場面の複数の指示を1回で照合する（範囲・画面は各指示の分を合わせ、重複だけ除く）。"""
+        if len(items) == 1:
+            return self._verify_one(did, frow, scenes, items[0][0], items[0][1], g, local_path)
+        expand = float(self.sc.get("verify_expand_seconds", 45))
+        ds, lines, images, seen, blocks = [], [], [], set(), []
+        for k, (dir_id, issues) in enumerate(items, 1):
+            d = self.db.q1("SELECT * FROM directives WHERE id=?", (dir_id,))
+            ds.append((d, issues))
+            for ln in window_lines(scenes, d["t_start"], d["t_end"], d["page"], expand):
+                key = (ln.origin, ln.t_start, ln.page, ln.text)
+                if key not in seen:
+                    seen.add(key)
+                    lines.append(ln)
+            _, imgs = self._reanalyze_media(frow, d, scenes, local_path, expand)
+            for im in imgs:
+                if str(im.path) not in {str(x.path) for x in images}:
+                    images.append(im)
+            target = {kk: d[kk] for kk in ("content", "directive_class", "base_strength", "condition", "t_start", "t_end",
+                                           "page", "speech", "target_task", "origin")}
+            blocks.append(f"### 確認対象 {k}\n```json\n{_j(target)}\n```\n指摘された問題点:\n"
+                          + "\n".join(f"- {x}" for x in issues))
+        lines.sort(key=lambda ln: (ln.t_start if ln.t_start is not None else -1, ln.page or 0))
+        text = (f"{P.VERIFY_INSTRUCTION}\n{P.VERIFY_GROUP_NOTE}\n## 資料\n{frow['path']}\n" + "\n".join(blocks)
+                + f"\n## 元の発話・画面・資料（各確認対象の前後 {int(expand)} 秒／前後ページまで）\n"
+                  f"{_clip(lines_text(lines), 30000) or '（なし）'}\n"
+                + f"## 資料全体の理解（参考）\n```json\n{self._global_brief(g)}\n```\n")
+        try:
+            r = self._ai(AIRequest(task="directive_verify_group", source_label=f"{frow['path']} 指示×{len(items)}",
+                                   text=text, images=images[:max(self.max_images, 20)], system=P.COMMON_SYSTEM,
+                                   schema=P.VERIFY_GROUP_SCHEMA), ds[0][0]["unit_id"])
+        except AIError as e:
+            for d, issues in ds:
+                self._mark(did, d["id"], f"verify:{d['id']}", "failed", str(e))
+            return
+        got = {int(x.get("id", 0)): x for x in (r.data or {}).get("results", [])}
+        for k, (d, issues) in enumerate(ds, 1):
+            data = got.get(k)
+            if data is None:  # まとめた照合で答えが無かった指示は、1件ずつの照合に戻す（落とさない）
+                self._verify_one(did, frow, scenes, d["id"], issues, g, local_path)
+                continue
+            self._apply_verdict(did, frow, scenes, d, issues, data, f"ai:{self.ai_name}:{r.model}")
+            self._mark(did, d["id"], f"verify:{d['id']}", "ok")
 
     def _apply_verdict(self, did: int, frow, scenes, d, issues: list[str], data: dict, analyzer: str) -> None:
         verdict = data.get("verdict")

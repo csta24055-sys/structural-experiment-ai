@@ -184,6 +184,12 @@ VERIFY_INSTRUCTION = """## 作業（第3回: 元の映像・音声・資料と�
 - 確認範囲内に、まだ一覧に無い指示を見つけたら additional_directives に入れる。
 """
 
+# 候補（品質の比較で同等と確かめるまで既定では使わない）: 同じ場面の複数の指示をまとめて照合する
+VERIFY_GROUP_SCHEMA = _obj({"results": {"type": "array", "items": _obj({"id": _I, **VERIFY_SCHEMA["properties"]})}})
+VERIFY_GROUP_NOTE = """複数の「確認対象」をまとめて渡します。それぞれを独立に、上の作業どおり照合し、results に確認対象ごとに1件ずつ
+（id は確認対象の番号）書いてください。1件ずつ別々に照合した場合と同じ深さで確認し、他の確認対象の結論に引きずられないこと。
+"""
+
 # ---------------- 資料横断の統合理解 ----------------
 _IDS = _AI
 CORPUS_SCHEMA = _obj({

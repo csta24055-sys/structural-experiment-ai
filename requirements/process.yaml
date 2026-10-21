@@ -32,6 +32,8 @@ sources:
   M19: {ts: "2026-10-21T10:59:53Z", title: 品質を一切落とさない費用削減}
   M20: {ts: "2026-10-21T11:48:26Z", title: 2,350円構成＋Excel・レポート動画の精度向上＋要求事項の管理}
   M21: {ts: "2026-10-21T12:12:07Z", title: エクセル・レポートの作り方の動画をさらに高精細に}
+  M22: {ts: "2026-10-21T12:46:27Z", title: 前処理を待たずに最新構成の費用概算}
+  M23: {ts: "2026-10-21T12:59:58Z", title: 最終統合指示（成果と品質を完全維持した全体費用最適化）}
   CLAUDE: {ts: "repository", title: CLAUDE.md（作業指示）}
 
 requirements:
@@ -194,6 +196,21 @@ requirements:
    supersedes_partly: [{id: P088, note: "最初からやり直す指示が後"}]}
 - {id: P088, src: [M16], stage: [reading], kind: 必須, status: superseded, superseded_by: P087, verify: manual,
    text: "正常に処理済みの部分は不要に再解析しない（M16 の後半で最初からやり直しを指示）"}
+
+- {id: P120, src: [M23], stage: [reading, semantic, integration, excel, report, cost], kind: 必須, verify: manual,
+   text: "最新システムで本来得られる成果そのもの（情報の種類・範囲・量・細かさ、数値、数式、操作手順、音声、映像上の現象、先生の説明・注意事項、解析結果、理解内容、中間成果物、最終的な Excel・レポート）と、その品質（正確性・詳細さ・網羅性・理解の深さ・再現性・検証可能性）を一切低下させずに、総費用を可能な限り下げる"}
+- {id: P121, src: [M23, M19], stage: [cost], kind: 禁止, verify: auto:candidates_gated,
+   text: "品質の同等性を確認できない変更は採用しない（元の方式を維持）。テストに合格しただけで完全な同等性を断定せず、未検証の部分は明示する"}
+- {id: P122, src: [M23], stage: [cost], kind: 必須, verify: auto:cost_tracking,
+   text: "費用の発生箇所・処理ごとの入出力・品質基準・テスト結果・改善前後の見積もりを追跡できる仕組みを整え、全体を再実行しなくても必要な部分だけ検証できる構成にする。既存の無料前処理結果・キャッシュを最大限再利用する"}
+- {id: P123, src: [M23], stage: [cost], kind: 必須, verify: manual,
+   text: "最適化作業自体の計算資源・GitHub Actions 利用枠・追加 API 費用も総費用に含めて判断する"}
+- {id: P124, src: [M23], stage: [cost], kind: 禁止, verify: manual,
+   text: "有料 AI モデルを格下げしない。解析範囲を勝手に狭めない。必要な情報を省略して費用を下げない。既存の処理方式には固執しない"}
+- {id: P125, src: [M23], stage: [excel, report], kind: 禁止, verify: manual,
+   text: "実際の Excel・レポート作成も承認まで開始しない"}
+- {id: P126, src: [M22], stage: [cost], kind: 必須, verify: manual,
+   text: "費用概算は読み取り段階と理解・統合段階を分け、それぞれの推定費用・合計・中心予想・想定範囲を日本円で示す。実行中の無料前処理は止めない"}
 
 # ---------------- 安全・秘密情報・Dropbox ----------------
 - {id: P090, src: [M15, M11, M0, M4, CLAUDE], stage: [security], kind: 禁止, verify: check:O5,

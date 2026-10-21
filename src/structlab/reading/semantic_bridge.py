@@ -23,8 +23,48 @@ from ..db import DB
 from ..models import fmt_time
 
 
+#: 読み取り結果を意味理解層に渡す形: json（既定）/ compact（候補: 同じキー・値をすべて含む短い書き方。
+#: 品質の比較で同等と確かめるまで既定では使わない）
+MATERIAL_FORMAT = "json"
+
+
+def compact(x, indent: str = "") -> str:
+    """JSON の値を、キー・値・順序をすべて保ったまま、括弧・引用符を省いた行の形にする（情報は減らさない）。"""
+    if isinstance(x, dict):
+        lines = []
+        for k, v in x.items():
+            if isinstance(v, (dict, list)) and v:
+                lines.append(f"{indent}{k}:")
+                lines.append(compact(v, indent + "  "))
+            else:
+                lines.append(f"{indent}{k}: {_scalar(v)}")
+        return "\n".join(lines)
+    if isinstance(x, list):
+        out = []
+        for v in x:
+            if isinstance(v, (dict, list)) and v:
+                body = compact(v, indent + "  ")
+                out.append(f"{indent}- " + body.lstrip())
+            else:
+                out.append(f"{indent}- {_scalar(v)}")
+        return "\n".join(out)
+    return f"{indent}{_scalar(x)}"
+
+
+def _scalar(v) -> str:
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (dict, list)):
+        return "{}" if isinstance(v, dict) else "[]"
+    return str(v).replace("\n", "\\n")
+
+
 def _ai_json(ai: dict | None) -> str:
-    return json.dumps(ai, ensure_ascii=False) if ai else ""
+    if not ai:
+        return ""
+    return compact(ai) if MATERIAL_FORMAT == "compact" else json.dumps(ai, ensure_ascii=False)
 
 
 def _screen_text(sc: dict) -> str:
@@ -38,6 +78,15 @@ def _screen_text(sc: dict) -> str:
     return (sc.get("ocr") or "")[:2000]
 
 
+def reading_fingerprint(rec: dict) -> str:
+    """読み取り結果のうち意味理解に渡す部分の指紋。"""
+    import hashlib
+    keep = {"hash": rec.get("content_hash"), "valid_end": rec.get("valid_end"), "speech": rec.get("speech"),
+            "scenes": [{k: sc.get(k) for k in ("start", "end", "ai", "ocr", "same_as", "frame_time")} for sc in rec.get("scenes", [])],
+            "pages": [{k: p.get(k) for k in ("page", "text_layer", "ai")} for p in rec.get("pages", [])]}
+    return hashlib.sha256(json.dumps(keep, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:24]
+
+
 def load_records(db: DB, records: dict[str, dict], segment: float = 120.0) -> list[int]:
     """reading.json を files / units / timeline に入れる。戻り値: file_id の一覧。"""
     ids = []
@@ -46,6 +95,8 @@ def load_records(db: DB, records: dict[str, dict], segment: float = 120.0) -> li
         if rec.get("error"):
             continue
         kind = rec["kind"]
+        # 意味理解の「版」は読み取り結果の指紋（読み取りが変われば新しく理解し直し、同じなら途中から続ける・使い直す）
+        rec = {**rec, "content_hash": reading_fingerprint(rec)}
         db.x("INSERT INTO files(path,path_key,kind,ext,size,content_hash,first_seen,last_seen,status,updated_at) "
              "VALUES(?,?,?,?,?,?,?,?,'done',?) ON CONFLICT(path_key) DO UPDATE SET content_hash=excluded.content_hash, "
              "status='done', updated_at=excluded.updated_at",
@@ -166,6 +217,8 @@ def run_semantic(cfg, out: Path, records: dict[str, dict], provider=None, *, bat
     dbp = out / "semantic.db"
     db = DB(dbp)
     seg = float(cfg.data.get("video", {}).get("segment_seconds", 120))
+    global MATERIAL_FORMAT
+    MATERIAL_FORMAT = cfg.data.get("reading", {}).get("semantic_material", "json")
     fids = load_records(db, records, seg)
     if provider is None:  # AI を使わない実行では、意味理解の AI の見積もりを書く（Batch なら料金は半分）
         from ..semantic.estimate import estimate

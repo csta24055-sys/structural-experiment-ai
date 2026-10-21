@@ -30,6 +30,9 @@ class AIRequest:
     system: str | None = None
     schema: dict | None = None
     max_tokens: int | None = None
+    #: text の先頭からこの文字数までは、同じ資料の他の依頼と完全に同じ（指示文・資料全体の理解など）。
+    #: その境目で文字を2つのブロックに分け、前半を API のキャッシュに置く（送る内容・順序は同じ。料金だけが変わる）
+    cache_prefix_chars: int = 0
 
 
 @dataclass

@@ -217,8 +217,19 @@ def style_rewrite(text: str) -> dict:
                                                      "reason": "mock"}], "not_applied": []}
 
 
+def directive_verify_group(text: str) -> dict:
+    """まとめた照合: 各確認対象を1件ずつの照合と同じ規則で判定する。"""
+    win = _section(text, "## 元の発話・画面・資料（")
+    out = []
+    for m in re.finditer(r"### 確認対象 (\d+)\n```json\n(.*?)\n```", text, re.S):
+        one = f"## 確認対象\n```json\n{m.group(2)}\n```\n## 元の発話・画面・資料（{win}"
+        out.append({"id": int(m.group(1)), **directive_verify(one)})
+    return {"results": out}
+
+
 TASKS = {"scene_analysis": scene_analysis, "global_synthesis": global_synthesis,
          "global_synthesis_part": global_synthesis, "scene_reinterpret": scene_reinterpret,
          "directive_extraction": directive_extraction, "directive_verify": directive_verify,
+         "directive_verify_group": directive_verify_group,
          "corpus_integration": corpus_integration, "blind_directives": blind_directives,
          "style_rewrite": style_rewrite}

@@ -639,6 +639,31 @@ def cmd_requirements(args) -> int:
     return 0
 
 
+def cmd_cost(args) -> int:
+    """費用の発生箇所（工程・依頼の種類ごと）と最適化ごとの効果（API は呼ばない）。"""
+    from . import costmodel as CM
+    res = CM.report([Path(x) for x in args.reading], Path(args.semantic_db) if args.semantic_db else None, Path(args.out))
+    print(json.dumps({k: v for k, v in res.items() if k != "assumptions"}, ensure_ascii=False, indent=1))
+    return 0
+
+
+def cmd_pilot(args) -> int:
+    """費用を下げる候補の品質の比較（小さな見本で、今の方式×2 と候補を比べる）。"""
+    from . import pilot as PL
+    if args.action == "plan":
+        for c in PL.CANDIDATES:
+            print(f"{c['id']}: {c['what']}\n  設定: {c['config']} / 見本: {c['sample']} / 見込み: {c['saving']}")
+        return 0
+    res = PL.compare(args.kind, Path(args.baseline), Path(args.repeat), Path(args.candidate), args.tolerance)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "pilot_decision.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(("採用" if res["adopt"] else "不採用（今の方式のまま）") + f": 候補の包含率 {res['containment_candidate']} / "
+          f"同じ方式どうし {res['containment_repeat']}、重要項目の欠落 候補 {res['critical_missing_candidate']} / "
+          f"同じ方式どうし {res['critical_missing_repeat']}")
+    return 0
+
+
 def cmd_connect_check(args) -> int:
     cfg = load_config(args.config)
     from .connect import run_connect_check
@@ -725,6 +750,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--semantic", help="意味理解の結果（semantic/directives.json を含むフォルダ）")
     p.add_argument("--evidence", help="作成段階の確認記録（{項目ID: {status, where, note}}）")
     p.add_argument("--out", required=True)
+    p = sub.add_parser("cost", help="費用の発生箇所と最適化ごとの効果（API は呼ばない）")
+    p.add_argument("--reading", nargs="+", required=True)
+    p.add_argument("--semantic-db")
+    p.add_argument("--out", default="work/costs")
+    p = sub.add_parser("pilot", help="費用を下げる候補が今の方式と同じ品質かを比べる（採用の判断）")
+    p.add_argument("action", choices=["plan", "compare"])
+    p.add_argument("--kind", choices=["reading", "semantic"], default="semantic")
+    p.add_argument("--baseline")
+    p.add_argument("--repeat")
+    p.add_argument("--candidate")
+    p.add_argument("--tolerance", type=float, default=0.02)
+    p.add_argument("--out", default="work/pilot")
     p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")
     p.add_argument("--no-download", action="store_true", help="動画・PDF・Excel の見本の取得を省略")
     p.add_argument("--no-claude", action="store_true")
@@ -738,7 +775,8 @@ def main(argv: list[str] | None = None) -> int:
                 "checks": cmd_checks, "reverify": cmd_reverify, "check-draft": cmd_check_draft,
                 "estimate": cmd_estimate, "search": cmd_search, "show-directive": cmd_show_directive,
                 "dropbox-auth": cmd_dropbox_auth, "connect-check": cmd_connect_check, "read": cmd_read,
-                "requirements": cmd_requirements}[args.cmd](args)
+                "requirements": cmd_requirements, "pilot": cmd_pilot,
+                "cost": cmd_cost}[args.cmd](args)
     except ConfigError as e:
         print(f"設定エラー: {e}", file=sys.stderr)
         return 2

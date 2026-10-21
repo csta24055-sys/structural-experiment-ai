@@ -84,8 +84,10 @@ jobs:
         with:
           path: work/reading
           key: reading-${{ matrix.target.key }}-${{ github.run_id }}
+          # 同じ内容・同じ設定の読み取り → 無ければ同じ内容の以前の読み取り（設定が変わった部分だけ読み直す）
           restore-keys: |
             reading-${{ matrix.target.key }}-
+            reading-${{ matrix.target.base }}-
       - name: Read
         run: |
           FLAGS=""
@@ -145,11 +147,29 @@ jobs:
           python -m structlab.reading.corpus results --out corpus -c "$STRUCTLAB_CONFIG" $FLAGS | tee -a "$GITHUB_STEP_SUMMARY"
           cp results/*/inventory.md corpus/ 2>/dev/null || true
           PYTHONPATH=src python -m structlab.reading.merge results > corpus/summary_all.md
+      - name: Restore earlier meaning results (resume; identical inputs are not sent again)
+        uses: actions/cache/restore@v4
+        with:
+          path: corpus/semantic_run/semantic.db
+          key: semantic-${{ github.run_id }}
+          restore-keys: |
+            semantic-
       - name: Meaning and directives (3 passes, rules always; AI only when allowed)
         run: |
           FLAGS=""
           if [ "${{ needs.plan.outputs.allow_ai }}" = "true" ]; then FLAGS="--allow-external-ai"; fi
           python -m structlab.reading.semantic_bridge results --out corpus/semantic_run -c "$STRUCTLAB_CONFIG" $FLAGS
+      - name: Save meaning results
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: corpus/semantic_run/semantic.db
+          key: semantic-${{ github.run_id }}
+      - name: Cost breakdown (where the cost arises; no API calls)
+        if: always()
+        run: |
+          python -m structlab -c "$STRUCTLAB_CONFIG" cost --reading results --semantic-db corpus/semantic_run/semantic.db \
+            --out corpus/costs | tee -a "$GITHUB_STEP_SUMMARY" || true
       - name: Requirements ledger (user instructions + teacher directives)
         if: always()
         run: |
