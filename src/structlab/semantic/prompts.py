@@ -115,6 +115,20 @@ REINTERPRET_SCHEMA = _obj({
     "changes": {"type": "array", "items": _obj({"field": _S, "before": _S, "after": _S, "reason": _S})},
     "analysis": SCENE_ANALYSIS,
 })
+#: 候補C5（既定では使わない）: 再解釈で変わった項目だけを返させる（変わらない項目を書き直させない＝出力の節約）。
+#: 保存する解釈は「現在の解釈」に変わった項目の新しい値を重ねたもので、項目・構造は同じ
+REINTERPRET_DELTA_SCHEMA = _obj({
+    "revised": {"type": "boolean"},
+    "changes": {"type": "array", "items": _obj({"field": _S, "before": _S, "after": _S, "reason": _S})},
+    "updated_fields": {"type": "array", "items": _obj({
+        "field": {"type": "string", "enum": list(SCENE_ANALYSIS["properties"])},
+        "value_json": _S})},
+})
+REINTERPRET_DELTA_NOTE = """## 返し方（変わった項目だけ）
+変更がなければ revised=false とし、updated_fields は空にしてください（現在の解釈を書き直さない）。
+変更した項目は、updated_fields にその項目の名前と、変更後の完全な値（その項目の形のまま JSON で表した文字列）を入れてください。
+変更していない項目は入れないでください（現在の解釈がそのまま使われます）。
+"""
 REINTERPRET_INSTRUCTION = """## 作業（局所理解と全体理解の相互照合）
 資料全体の理解結果を踏まえて、この場面の解釈を見直してください。
 後の場面での訂正・補足・例外・条件変更によって、この場面の説明の意味や有効性が変わる場合は、その内容を反映し、

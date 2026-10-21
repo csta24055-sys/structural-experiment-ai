@@ -2,6 +2,10 @@
 """システムの状態を、Git 履歴なしでも読める独立した保存データにまとめる（最適化前後の保存用）。
 
   python3 scripts/snapshot.py --ref <commit> --name <名前> [--docs <手書き資料のフォルダ>] [--test]
+  python3 scripts/snapshot.py --compare <前の名前> <後の名前>   （差分の機械的な比較を snapshots/DIFF-<前>-<後>.md に）
+
+手書き資料（コードから読み取れない前提・判断理由・進捗）は docs/handoff/ に置き、変わった部分だけを直す（毎回書き直さない）。
+--docs を省略すると docs/handoff/ を使う。それ以外（モジュール・設定・ワークフロー・要求事項・テスト・環境・差分）は機械的に作る。
 
 出力（リポジトリの snapshots/ の下）:
   snapshots/<名前>/                 … 読むための資料（GitHub でそのまま読める）
@@ -207,15 +211,70 @@ def run_tests(src: Path) -> str:
         return r.stdout[-6000:] + r.stderr[-2000:]
 
 
+def compare(root: Path, before: str, after: str) -> str:
+    """2 つの保存データの差分（ファイルの追加・削除・変更、行数、要求事項の追加）を機械的に書く（AI の文章生成を使わない）。"""
+    import difflib
+    import yaml
+    mb = json.loads((root / before / "MANIFEST.json").read_text(encoding="utf-8"))
+    ma = json.loads((root / after / "MANIFEST.json").read_text(encoding="utf-8"))
+    fb = {f["path"]: f["sha256"] for f in mb["files"]}
+    fa = {f["path"]: f["sha256"] for f in ma["files"]}
+    added = sorted(set(fa) - set(fb))
+    removed = sorted(set(fb) - set(fa))
+    changed = sorted(p for p in set(fa) & set(fb) if fa[p] != fb[p])
+    with tempfile.TemporaryDirectory() as td:
+        rows = []
+        tb, ta = Path(td) / "b", Path(td) / "a"
+        for tgz, dest, name in ((root / f"{before}.tar.gz", tb, before), (root / f"{after}.tar.gz", ta, after)):
+            with tarfile.open(tgz) as t:
+                t.extractall(dest, filter="data")
+        for p in changed + added + removed:
+            old = (tb / before / "source" / p)
+            new = (ta / after / "source" / p)
+            try:
+                lo = old.read_text(encoding="utf-8").splitlines() if old.exists() else []
+                ln = new.read_text(encoding="utf-8").splitlines() if new.exists() else []
+            except UnicodeDecodeError:
+                rows.append(f"| `{p}` | （バイナリ） | |")
+                continue
+            d = list(difflib.unified_diff(lo, ln, lineterm="", n=0))
+            plus = sum(1 for x in d if x.startswith("+") and not x.startswith("+++"))
+            minus = sum(1 for x in d if x.startswith("-") and not x.startswith("---"))
+            rows.append(f"| `{p}` | +{plus} / −{minus} | {'追加' if p in added else '削除' if p in removed else '変更'} |")
+        def req_ids(base):
+            f = base / "source" / "requirements" / "process.yaml"
+            d = yaml.safe_load(f.read_text(encoding="utf-8")) if f.exists() else {}
+            return {r["id"]: r for r in d.get("requirements", []) or []}, set((d.get("sources") or {}).keys())
+        rb, sb = req_ids(tb / before)
+        ra, sa = req_ids(ta / after)
+    new_req = sorted(set(ra) - set(rb))
+    lines = [f"# 保存データの機械的な比較: {before} → {after}", "",
+             f"- {before}: コミット {mb['commit'][:7]}（{mb['commit_date']}）、{len(fb)} ファイル",
+             f"- {after}: コミット {ma['commit'][:7]}（{ma['commit_date']}）、{len(fa)} ファイル",
+             f"- 追加 {len(added)}・削除 {len(removed)}・変更 {len(changed)} ファイル", "",
+             "## ファイルごとの変更（行数）", "", "| ファイル | 行 | 種類 |", "|---|---|---|", *rows, "",
+             f"## 要求事項の台帳: 追加された出典 {sorted(sa - sb) or 'なし'}、追加された項目 {len(new_req)} 件", ""]
+    lines += [f"- {i}: {ra[i].get('text', '')}" for i in new_req]
+    out = root / f"DIFF-{before}-{after}.md"
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", required=True)
-    ap.add_argument("--name", required=True)
-    ap.add_argument("--docs", help="手書き資料（*.md）のフォルダ。保存データにそのまま入れる")
+    ap.add_argument("--ref")
+    ap.add_argument("--name")
+    ap.add_argument("--docs", default=str(ROOT / "docs" / "handoff"), help="手書き資料（*.md）のフォルダ。保存データにそのまま入れる")
+    ap.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"), help="2 つの保存データの機械的な比較")
     ap.add_argument("--test", action="store_true", help="保存データ単体でテストを実行して結果を記録する")
     ap.add_argument("--out", default=str(ROOT / "snapshots"))
     a = ap.parse_args()
     out_root = Path(a.out)
+    if a.compare:
+        print(compare(out_root, *a.compare))
+        return
+    if not (a.ref and a.name):
+        ap.error("--ref と --name が必要です")
     folder = out_root / a.name
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "source"

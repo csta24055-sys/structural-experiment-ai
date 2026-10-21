@@ -53,6 +53,20 @@ def _clip(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n] + f"…（以下 {len(s) - n} 文字省略）"
 
 
+def apply_updates(cur: dict, updates: list[dict]) -> dict:
+    """候補C5: 現在の解釈に、変わった項目の新しい値を重ねる（値は JSON。読めなければ文字列のまま）。"""
+    out = dict(cur)
+    for u in updates:
+        f = u.get("field")
+        if not f:
+            continue
+        try:
+            out[f] = json.loads(u.get("value_json", ""))
+        except (TypeError, ValueError):
+            out[f] = u.get("value_json", "")
+    return out
+
+
 class SemanticEngine:
     def __init__(self, cfg, db: DB, *, ai_call: Callable[[AIRequest, int | None], Any] | None = None,
                  ai_name: str = "", checkpoint: Callable[[], None] | None = None, transcriber=None, ocr=None,
@@ -549,16 +563,26 @@ class SemanticEngine:
                 else:
                     text, cache_k = head + scene_part + glob + tail, 0
                 imgs = [AIImage(p, lbl) for p, lbl in sc.images[:self.max_images]] if self.sc.get("reinterpret_images") else []
+                delta = self.sc.get("reinterpret_output") == "delta"  # 候補C5（既定では使わない）
+                if delta:
+                    text = text.replace(P.REINTERPRET_INSTRUCTION, P.REINTERPRET_INSTRUCTION.replace(
+                        "変更がなければ revised=false とし analysis は現在の解釈のまま返してください。", "") + P.REINTERPRET_DELTA_NOTE, 1)
+                    if cache_k:  # 指示文が変わった分だけ、キャッシュの境目（資料全体の理解の終わり）を合わせる
+                        cache_k = text.index(glob) + len(glob)
                 try:
-                    r = self._ai(AIRequest(task="scene_reinterpret", source_label=f"{frow['path']} {sc.label}", text=text,
+                    r = self._ai(AIRequest(task="scene_reinterpret_delta" if delta else "scene_reinterpret",
+                                           source_label=f"{frow['path']} {sc.label}", text=text,
                                            images=imgs, t_start=sc.t_start, t_end=sc.t_end, system=P.COMMON_SYSTEM,
-                                           schema=P.REINTERPRET_SCHEMA, cache_prefix_chars=cache_k,
+                                           schema=P.REINTERPRET_DELTA_SCHEMA if delta else P.REINTERPRET_SCHEMA,
+                                           cache_prefix_chars=cache_k,
                                            prefix_before_images=bool(imgs), cache_ttl="1h" if cache_k else ""),
                                  sc.unit_id)
                 except AIError as e:
                     self._mark(did, sc.unit_id, step, "failed", str(e))
                     continue
                 data = r.data or {}
+                if delta:
+                    data["analysis"] = apply_updates(cur, data.get("updated_fields") or [])
                 ch = data.get("changes") or [] if data.get("revised") else []
                 self._save_scene(did, sc, rnd + 1, data.get("analysis") or cur, ch)
                 if ch:

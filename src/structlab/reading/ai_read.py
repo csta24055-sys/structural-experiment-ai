@@ -480,8 +480,9 @@ def detail_chunks(scene: dict, size: int = DETAIL_EVENTS_PER_CALL) -> list[list[
     return [evs[i:i + size] for i in range(0, len(evs), size)] or [[]]
 
 
-def detail_images(scene: dict, k: int, chunks: list[list[dict]], fmt_time) -> list[AIImage]:
-    """k 番目の部分で送る画像（元の解像度の可逆画像から作る）。"""
+def detail_images(scene: dict, k: int, chunks: list[list[dict]], fmt_time, event_scale: float | None = None) -> list[AIImage]:
+    """k 番目の部分で送る画像（元の解像度の可逆画像から作る）。
+    event_scale: 変化した画面の全体の倍率（None は既定の 2 倍）。候補 D1 は 1（元の解像度。変わった部分の 3 倍の拡大は残す）"""
     from . import detail as D
     imgs = []
     rep = scene["frame"]
@@ -497,7 +498,8 @@ def detail_images(scene: dict, k: int, chunks: list[list[dict]], fmt_time) -> li
         prev = last["frame"]
     base = sum(len(c) for c in chunks[:k])
     for n, e in enumerate(chunks[k], base + 1):
-        imgs.append(AIImage(D.overview(e["frame"]), f"[F{n}] {fmt_time(e['time'])} の画面（変化・全体）", lossless=True))
+        ov = D.overview(e["frame"]) if event_scale is None else D.overview(e["frame"], event_scale)
+        imgs.append(AIImage(ov, f"[F{n}] {fmt_time(e['time'])} の画面（変化・全体）", lossless=True))
         z = D.change_zoom(prev, e["frame"])
         if z:
             imgs.append(AIImage(z, f"[F{n}] {fmt_time(e['time'])} の画面の、直前から変わった部分の拡大", lossless=True))
@@ -505,14 +507,14 @@ def detail_images(scene: dict, k: int, chunks: list[list[dict]], fmt_time) -> li
     return imgs
 
 
-def video_detail_requests(file_label: str, scene: dict, fmt_time) -> list[AIRequest]:
+def video_detail_requests(file_label: str, scene: dict, fmt_time, event_scale: float | None = None) -> list[AIRequest]:
     """場面の代表画面・部分拡大・変化したすべての画面（変わった部分の拡大つき）・音声を、多ければ複数回に分けて読む。"""
     chunks = detail_chunks(scene)
     speech = "\n".join(f"[{fmt_time(x['start'])}] {x['text']}" for x in scene.get("speech", []))[:8000]
     ocr = (scene.get("ocr") or "")[:3000]
     out = []
     for k, evs in enumerate(chunks):
-        imgs = detail_images(scene, k, chunks, fmt_time)
+        imgs = detail_images(scene, k, chunks, fmt_time, event_scale)
         part = f"（{k + 1}/{len(chunks)} 部分目: {fmt_time(evs[0]['time'])}–{fmt_time(evs[-1]['time'])} の変化）" \
             if len(chunks) > 1 and evs else ""
         text = (f"# 資料: {file_label} の動画 {fmt_time(scene['start'])}–{fmt_time(scene['end'])} の場面{part}\n"

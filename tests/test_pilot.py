@@ -102,3 +102,35 @@ def test_branch_compare_reuses_baseline_as_production(tmp_path):
     run_semantic(cfg, tmp_path / "prod", recs, prov, log=lambda m: None)
     again = [c.source_label for c in prov.calls[n:] if c.task.startswith("directive_verify")]
     assert again and not any(lbl.startswith("v0.mp4") for lbl in again)   # 見本の資料の照合は送り直さない
+
+
+def test_reinterpret_delta_candidate_rebuilds_the_same_analysis(tmp_path):
+    """候補C5（再解釈で変わった項目だけ返す）: 保存される場面の解釈・変更点・指示は、全体を書き直させる今の方式と同じになる（Mock）。
+    実際の AI での同等性は有料の比較（structlab pilot branch --arm C5）で確かめるまで既定では使わない。"""
+    import json
+    from structlab.ai.mock_provider import MockProvider
+    from structlab.db import DB
+    from structlab.reading.semantic_bridge import run_semantic
+    from tests.test_reading import make_cfg
+    speech = ["グラフには必ず軸ラベルを書いてください", "さっきの説明を訂正します。軸ラベルは英語で書いてください",
+              "データは消さないでください", "提出はPDFにしてください"]
+    rec = {"path": "v.mp4", "kind": "video", "duration": 520.0, "has_audio": True, "content_hash": "h", "transcriber": "x",
+           "scenes": [{"index": 0, "start": 0, "end": 520, "frame_time": 1, "frame": "", "mode": "slides",
+                       "ai": {"title": "t", "text_blocks": []}}],
+           "speech": [{"start": 10.0 + 125 * k, "end": 14.0 + 125 * k, "text": s} for k, s in enumerate(speech)]}
+    out = {}
+    for mode in ("full", "delta"):
+        cfg = make_cfg(tmp_path, tmp_path)
+        cfg.data["semantic"].update(ai=True, reinterpret_output=mode)
+        prov = MockProvider()
+        run_semantic(cfg, tmp_path / mode, {"v.mp4": rec}, prov, batch=False, log=lambda m: None)
+        db = DB(tmp_path / mode / "semantic.db")
+        scenes = [(r["unit_id"], r["pass"], r["analysis_json"], r["changes_json"])
+                  for r in db.q("SELECT * FROM sem_scenes ORDER BY unit_id, pass")]
+        db.close()
+        d = json.loads((tmp_path / mode / "semantic" / "directives.json").read_text(encoding="utf-8"))
+        out[mode] = (scenes, sorted((x["content"], x["class"], x["verification"]) for x in d),
+                     {c.task for c in prov.calls})
+    assert out["full"][0] == out["delta"][0] and len(out["full"][0]) > 4
+    assert out["full"][1] == out["delta"][1]
+    assert "scene_reinterpret_delta" in out["delta"][2] and "scene_reinterpret" not in out["delta"][2]

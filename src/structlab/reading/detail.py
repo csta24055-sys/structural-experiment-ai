@@ -57,8 +57,11 @@ def derive(src: str | Path, tag: str, scale: float, box: tuple[int, int, int, in
     return out
 
 
-def overview(src: str | Path) -> Path:
-    return derive(src, "x2", OVERVIEW_SCALE)
+def overview(src: str | Path, scale: float = OVERVIEW_SCALE) -> Path:
+    """全体の画面（既定は元の 2 倍）。scale=1 は元の解像度のまま（候補 D1、既定では使わない）。"""
+    if abs(scale - OVERVIEW_SCALE) < 1e-6:
+        return derive(src, "x2", OVERVIEW_SCALE)
+    return derive(src, f"x{scale:g}", scale)
 
 
 def _ink(gray: np.ndarray) -> np.ndarray:

@@ -115,6 +115,13 @@ def scene_reinterpret(text: str) -> dict:
     return {"revised": False, "changes": [], "analysis": cur}
 
 
+def scene_reinterpret_delta(text: str) -> dict:
+    full = scene_reinterpret(text)
+    cur = _json_after(text, "### この場面の現在の解釈") or {}
+    ups = [{"field": k, "value_json": json.dumps(v, ensure_ascii=False)} for k, v in full["analysis"].items() if cur.get(k) != v]
+    return {"revised": full["revised"], "changes": full["changes"], "updated_fields": ups}
+
+
 def directive_extraction(text: str) -> dict:
     sec = _section(text, "## 規則による候補（全件確認すること）")
     out, dismissed = [], []
@@ -228,7 +235,7 @@ def directive_verify_group(text: str) -> dict:
 
 
 TASKS = {"scene_analysis": scene_analysis, "global_synthesis": global_synthesis,
-         "global_synthesis_part": global_synthesis, "scene_reinterpret": scene_reinterpret,
+         "global_synthesis_part": global_synthesis, "scene_reinterpret": scene_reinterpret, "scene_reinterpret_delta": scene_reinterpret_delta,
          "directive_extraction": directive_extraction, "directive_verify": directive_verify,
          "directive_verify_group": directive_verify_group,
          "corpus_integration": corpus_integration, "blind_directives": blind_directives,

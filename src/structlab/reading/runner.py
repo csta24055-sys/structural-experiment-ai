@@ -311,7 +311,7 @@ class Reader:
 
         def detail_job(sc):
             def run():
-                reqs = ai_read.video_detail_requests(label, sc, fmt_time)
+                reqs = ai_read.video_detail_requests(label, sc, fmt_time, role.get("event_scale"))
                 parts = [self._ai_cached(rec, f"scene_{sc['index']:04d}_d{k}", (lambda r=r: r))
                          for k, r in enumerate(reqs)]
                 if self.batch and any(x is None for x in parts):
@@ -517,7 +517,7 @@ def all_requests(rec: dict, vocab: str = "") -> list:
     if role.get("kind") == "lecture_detail":
         for sc in uniq:
             if sc.get("mode") != "experiment":
-                reqs += ai_read.video_detail_requests(label, sc, fmt_time)
+                reqs += ai_read.video_detail_requests(label, sc, fmt_time, role.get("event_scale"))
     else:
         reqs += [ai_read.video_scene_request(label, sc, fmt_time) for sc in uniq if sc.get("mode") != "experiment"]
     reqs += [ai_read.speech_fix_request(label, i, segs, vocab, fmt_time)

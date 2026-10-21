@@ -45,7 +45,10 @@ CANDIDATES = [
 #: 段階を分けた比較の対象（候補 → 費用モデルの設定）
 ARM_OPTS = {"C1v": {"prefix_layout": True, "layout_scope": "verify"}, "C4": {"verify_group": 5},
             "C1v+C4": {"prefix_layout": True, "layout_scope": "verify", "verify_group": 5},
-            "C1r": {"prefix_layout": True, "layout_scope": "reinterpret"}, "C2": {"compact": True}}
+            "C1r": {"prefix_layout": True, "layout_scope": "reinterpret"}, "C5": {"reinterpret_delta": True},
+            "C1r+C5": {"prefix_layout": True, "layout_scope": "reinterpret", "reinterpret_delta": True},
+            "C1+C4+C5": {"prefix_layout": True, "verify_group": 5, "reinterpret_delta": True},
+            "C2": {"compact": True}}
 #: 段階ごとに、比較で実行し直す工程（費用モデルの行の名前）
 STAGE_ROWS = {"verify": ("3 元資料との照合",),
               "reinterpret": ("1 再解釈", "1 全体の理解", "2 指示の抽出", "3 元資料との照合"),
@@ -187,6 +190,11 @@ ARMS = {
     "C4": {"stage": "verify", "semantic": {"verify_group": 5}},
     "C1v+C4": {"stage": "verify", "semantic": {"cache_layout": "prefix_verify", "verify_group": 5}},
     "C1r": {"stage": "reinterpret", "semantic": {"cache_layout": "prefix_reinterpret"}},
+    "C5": {"stage": "reinterpret", "semantic": {"reinterpret_output": "delta"}},
+    "C1r+C5": {"stage": "reinterpret", "semantic": {"cache_layout": "prefix_reinterpret", "reinterpret_output": "delta"}},
+    # まとめて 1 回で比べる（再解釈から先をすべて）。不合格なら個別の比較に分ける
+    "C1+C4+C5": {"stage": "reinterpret", "semantic": {"cache_layout": "prefix", "verify_group": 5,
+                                                      "reinterpret_output": "delta"}},
 }
 
 

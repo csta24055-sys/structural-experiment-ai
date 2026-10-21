@@ -271,6 +271,9 @@ def check_auto(name: str, c: Ctx) -> tuple[str, str]:
         sem = c.cfg.data.get("semantic", {})
         on = [k for k, v in (("semantic.cache_layout", bool(sem.get("cache_layout"))),
                              ("semantic.verify_group", int(sem.get("verify_group", 1)) > 1),
+                             ("semantic.reinterpret_output", sem.get("reinterpret_output") == "delta"),
+                             ("reading.roles[].event_scale", any(r.get("event_scale") is not None
+                                                                 for r in c.cfg.data.get("reading", {}).get("roles", []) or [])),
                              ("reading.semantic_material", c.cfg.data.get("reading", {}).get("semantic_material") == "compact"))
               if v]
         if on and not (c.corpus and list(Path(c.corpus).rglob("pilot_decision.json"))):

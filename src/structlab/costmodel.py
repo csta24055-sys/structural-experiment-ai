@@ -25,7 +25,7 @@ ASSUME = {  # 実測できない量の仮定（推測）
     "reinterpret_rounds": (1.0, 1.5, 2.0),
     "verify_per_doc": (15, 30, 40),               # 第3回の照合（上限 40/資料）
     "thinking_per_call": (500, 1500, 3000),       # 思考（出力に含まれる）
-    "out_scene": (1000, 1500, 2500), "out_synthesis": (3000, 5000, 8000), "out_reinterpret": (500, 1000, 1500),
+    "out_scene": (1000, 1500, 2500), "out_synthesis": (3000, 5000, 8000), "out_reinterpret_changes": (200, 400, 700),
     "out_directives": (1000, 2000, 3500), "out_verify": (300, 700, 1200), "out_corpus": (8000, 12000, 16000),
     "cache_hit": (0.3, 0.6, 0.9),                 # 同じ Batch の中でキャッシュから読まれる割合（先書きなし。保証されない）
     "cache_hit_seq5m": (0.0, 0.3, 0.6),           # 次の Batch（数分〜1時間後）で 5 分のキャッシュが残っている割合
@@ -75,7 +75,7 @@ def prefix_units(n: float, mode: str, case: str) -> float:
 
 def _semantic(db_path: Path, case: str, directive_prefix_cache: bool, prefix_layout: bool, compact: bool,
               batch: bool, verify_group: int = 1, parallel: bool = True, priming: bool = True,
-              only: str | None = None, layout_scope: str = "both") -> dict:
+              only: str | None = None, layout_scope: str = "both", reinterpret_delta: bool = False) -> dict:
     """意味理解の費用。parallel: 指示の抽出・照合を資料ごとに 1 回の Batch にまとめる（内容は同じ）。
     priming: 同じ先頭部分の依頼が多い Batch では 1 件で先に 1 時間のキャッシュを書く（内容は同じ）。
     parallel=False, priming=False が M24 より前の構成（指示の抽出は場面ごとに次の Batch で 5 分のキャッシュを使い直す）。"""
@@ -122,7 +122,9 @@ def _semantic(db_path: Path, case: str, directive_prefix_cache: bool, prefix_lay
             Lr = min(L, 15000 * tpc)
             # 再解釈は場面の順に 1 件ずつ（次の Batch）。候補C1 では資料全体の理解を先頭に置き 1 時間キャッシュ
             add("1 再解釈", rounds, SYS_TOKENS + INSTR["reinterpret"] + Lr + A + G + 3000 * tpc,
-                _a("out_reinterpret", case) + think, prefix=G if pl_r else 0,
+                # 出力: 今の方式は変更の有無にかかわらず場面の解釈の全体を書き直す（＋変更点）。候補C5 は変わった項目だけ
+                (_a("out_reinterpret_changes", case) * (1.5 if reinterpret_delta else 1)
+                 + (0 if reinterpret_delta else _a("out_scene", case)) + think), prefix=G if pl_r else 0,
                 units=rounds * prefix_units(n, "seq1h", case) / n if pl_r else None)
             Ld = min(L, 20000 * tpc) + min(M, 10000 * tpc) + 2 * min(L, 4000 * tpc)
             add("2 指示の抽出", 1, SYS_TOKENS + INSTR["directives"] + G + A + Ld + 800,
@@ -157,7 +159,7 @@ def _semantic(db_path: Path, case: str, directive_prefix_cache: bool, prefix_lay
 
 def semantic(db_path: Path, case: str = "mid", **kw) -> dict:
     opts = {"directive_prefix_cache": True, "prefix_layout": False, "compact": False, "batch": True, "verify_group": 1,
-            "parallel": True, "priming": True, "only": None, "layout_scope": "both"}
+            "parallel": True, "priming": True, "only": None, "layout_scope": "both", "reinterpret_delta": False}
     opts.update(kw)
     return _semantic(db_path, case, **opts)
 
@@ -213,6 +215,8 @@ def report(reading_dirs: list[Path], db_path: Path | None, out: Path) -> dict:
             "候補C1 資料全体の理解を先頭に置く（再解釈・照合。品質の比較が必要）":
                 round(mid - semantic(db_path, "mid", prefix_layout=True)["yen"]),
             "候補C2 短い書き方（品質の比較が必要）": round(mid - semantic(db_path, "mid", compact=True)["yen"]),
+            "候補C5 再解釈は変わった項目だけ返す（品質の比較が必要）":
+                round(mid - semantic(db_path, "mid", reinterpret_delta=True)["yen"]),
             "候補C4 照合のまとめ（品質の比較が必要）": round(mid - semantic(db_path, "mid", verify_group=5)["yen"]),
             "Batch API（採用済み）": round(semantic(db_path, "mid", batch=False)["yen"] - mid),
         }
