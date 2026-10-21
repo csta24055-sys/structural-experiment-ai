@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -765,3 +767,122 @@ def test_candidate_options_keep_results_with_mock(tmp_path):
         d = json.loads((tmp_path / name / "semantic" / "directives.json").read_text(encoding="utf-8"))
         out[name] = sorted((x["class"], x["content"], x["verification"]) for x in d)
     assert out["base"] == out["cand"] and out["base"]
+
+
+def _semantic_run(tmp_path, name, parallel):
+    """意味理解を Batch の Mock で実行し、送った依頼の全文と、結果（指示の一覧）を返す。"""
+    from structlab.ai.mock_provider import MockProvider
+    from structlab.reading.semantic_bridge import run_semantic
+
+    class BatchMock(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.batches, self.sent = [], []
+
+        def analyze_batch(self, reqs, log=print, known=None, on_created=None):
+            self.batches.append(len(reqs))
+            # 指示の番号（DB の行番号）は資料のスレッドの進み方で入れ替わる（1件ずつ送る場合も同じ）ので伏せて比べる
+            ids = lambda s: re.sub(r"(#|\"id\": ?)\d+", r"\1N", s)  # noqa: E731
+            self.sent += [(r.task, ids(r.source_label), ids(r.text), r.system, json.dumps(r.schema, sort_keys=True),
+                           r.cache_prefix_chars if "#" not in r.text[:r.cache_prefix_chars] else -1,
+                           tuple((str(i.path), i.label) for i in r.images)) for r in reqs]
+            return [self.analyze(r) for r in reqs]
+    speech = ["グラフには必ず軸ラベルを書いてください", "考察は自分の言葉で書いてください", "データは消さないでください",
+              "提出はPDFにしてください", "単位は必ず書くこと", "計算は有効数字3桁で", "図番号を付けてください"]
+    recs = {}
+    for n in range(2):
+        recs[f"v{n}.mp4"] = {"path": f"v{n}.mp4", "kind": "video", "duration": 500.0, "has_audio": True,
+                             "content_hash": f"h{n}", "transcriber": "x",
+                             "scenes": [{"index": 0, "start": 0, "end": 500, "frame_time": 1, "frame": "", "mode": "slides",
+                                         "ai": {"title": "t", "text_blocks": [{"text": "必ず単位を書くこと", "role": "body"}]}}],
+                             "speech": [{"start": 10.0 + 70 * k, "end": 14.0 + 70 * k, "text": s} for k, s in enumerate(speech)]}
+    cfg = make_cfg(tmp_path, tmp_path)
+    cfg.data["semantic"]["ai"] = True
+    cfg.data["semantic"]["parallel_independent"] = parallel
+    prov = BatchMock()
+    run_semantic(cfg, tmp_path / name, recs, prov, batch=True, log=lambda m: None)
+    d = json.loads((tmp_path / name / "semantic" / "directives.json").read_text(encoding="utf-8"))
+    keep = ("content", "directive_class", "verification", "effective", "t_start", "file")
+    return prov, sorted(json.dumps({k: x.get(k) for k in keep}, ensure_ascii=False, sort_keys=True) for x in d)
+
+
+def test_independent_requests_are_sent_together_with_identical_content(tmp_path):
+    """指示の抽出・照合をまとめて送っても、AI に送る依頼の全文（指示文・本文・画像・スキーマ・キャッシュの境目）と
+    結果（指示の一覧）は1件ずつ送る場合と同じ。Batch を待つ回数だけが減る。"""
+    seq, d_seq = _semantic_run(tmp_path, "seq", False)
+    par, d_par = _semantic_run(tmp_path, "par", True)
+    assert sorted(seq.sent) == sorted(par.sent) and len(seq.sent) > 10
+    assert any(t[0] == "directive_extraction" for t in par.sent) and any(t[0] == "directive_verify" for t in par.sent)
+    assert d_seq == d_par and d_par
+    assert len(par.batches) < len(seq.batches)
+
+
+def test_without_batch_gate_each_result_is_saved_before_the_next_call(tmp_path):
+    """Batch でまとめない経路（structlab run など）では従来どおり 1 件ずつ送ってすぐ保存する。
+    途中で止まっても、受け取った結果は失われない（同じ依頼を次回送り直さない）。"""
+    from structlab.ai.mock_provider import MockProvider
+    from structlab.reading.semantic_bridge import run_semantic
+
+    class Stop(Exception):
+        pass
+
+    class Interrupt(MockProvider):
+        def __init__(self, n):
+            super().__init__()
+            self.n = n
+
+        def analyze(self, req):
+            if req.task == "directive_extraction":
+                self.n -= 1
+                if self.n < 0:
+                    raise Stop()
+            return super().analyze(req)
+    speech = [f"項目{k}は必ず記録してください" for k in range(6)]
+    recs = {"v.mp4": {"path": "v.mp4", "kind": "video", "duration": 700.0, "has_audio": True, "content_hash": "h",
+                      "transcriber": "x", "scenes": [{"index": 0, "start": 0, "end": 700, "frame_time": 1, "frame": "",
+                                                      "mode": "slides", "ai": {"title": "t", "text_blocks": []}}],
+                      "speech": [{"start": 10.0 + 120 * k, "end": 14.0 + 120 * k, "text": s} for k, s in enumerate(speech)]}}
+    cfg = make_cfg(tmp_path, tmp_path)
+    cfg.data["semantic"]["ai"] = True
+    try:
+        run_semantic(cfg, tmp_path / "s", recs, Interrupt(3), batch=False, log=lambda m: None)
+    except Stop:
+        pass
+    from structlab.db import DB
+    db = DB(tmp_path / "s" / "semantic.db")
+    ok = db.q("SELECT 1 FROM sem_steps WHERE step='directives' AND status='ok'")
+    db.close()
+    assert len(ok) == 3   # 止まる前に受け取った 3 場面分は保存済み
+
+
+def test_interrupted_semantic_batch_is_fetched_not_sent_again(tmp_path):
+    """意味理解の Batch を送った後に中断しても、再実行では同じ依頼の集まりなら送信済みの Batch の結果を取りに行く。"""
+    from structlab.ai.base import AIRequest, AIResponse
+    from structlab.reading.semantic_bridge import BatchGate
+    created = []
+
+    class P:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def analyze_batch(self, reqs, log=print, known=None, on_created=None):
+            if known:
+                return [AIResponse(data={"from": known[0], "text": r.text}, model="m") for r in reqs]
+            on_created(0, "batch-1")
+            created.append(len(reqs))
+            if self.fail:
+                raise KeyboardInterrupt
+            return [AIResponse(data={"text": r.text}, model="m") for r in reqs]
+    state = tmp_path / "st.json"
+    reqs = [AIRequest(task="t", source_label=str(i), text=f"本文{i}") for i in range(3)]
+    g = BatchGate(P(fail=True), log=lambda m: None, state_path=state)
+    try:
+        g._send([(r, threading.Event(), {}) for r in reqs])
+    except KeyboardInterrupt:
+        pass
+    g2 = BatchGate(P(fail=False), log=lambda m: None, state_path=state)
+    slots = [(r, threading.Event(), {}) for r in reversed(reqs)]   # 順序が変わっても同じ集まりと分かる
+    g2._send(slots)
+    assert created == [3]
+    assert all(s["resp"].data["from"] == "batch-1" and s["resp"].data["text"] == r.text for r, _, s in slots)
+    assert json.loads(state.read_text(encoding="utf-8")) == {}      # 受け取ったら記録を消す

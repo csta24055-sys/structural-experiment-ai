@@ -56,11 +56,14 @@ def _clip(s: str, n: int) -> str:
 class SemanticEngine:
     def __init__(self, cfg, db: DB, *, ai_call: Callable[[AIRequest, int | None], Any] | None = None,
                  ai_name: str = "", checkpoint: Callable[[], None] | None = None, transcriber=None, ocr=None,
-                 run_id: int | None = None):
+                 run_id: int | None = None, ai_call_many: Callable[[list], list] | None = None):
         self.cfg = cfg
         self.sc = cfg.data["semantic"]
         self.db = db
         self.ai_call = ai_call
+        #: 互いの結果に依存しない依頼（指示の抽出・照合）をまとめて送る関数（Batch の 1 回にまとめる）。
+        #: 依頼の中身は1件ずつ送る場合と同じ（tests/test_semantic.py で依頼の全文が一致することを確認）
+        self.ai_call_many = ai_call_many
         self.ai_name = ai_name
         self.checkpoint = checkpoint or (lambda: None)
         self.transcriber = transcriber
@@ -70,7 +73,10 @@ class SemanticEngine:
         self.max_images = int(cfg.data["ai"]["max_images_per_call"])
         self.ai_stopped: str | None = None
         #: 候補の最適化（資料全体の理解を先頭に置いてキャッシュ）。品質の比較で同等と確認できたときだけ true にする
-        self.prefix_layout = self.sc.get("cache_layout") == "prefix"
+        #: "prefix" は再解釈・照合の両方、"prefix_reinterpret" / "prefix_verify" は片方だけ（見本の比較を段階ごとに行うため）
+        layout = self.sc.get("cache_layout") or ""
+        self.prefix_layout = layout in ("prefix", "prefix_reinterpret")
+        self.prefix_layout_verify = layout in ("prefix", "prefix_verify")
 
     @property
     def ai_active(self) -> bool:
@@ -152,6 +158,29 @@ class SemanticEngine:
         if self.ai_stopped:
             raise BudgetExceeded(self.ai_stopped)
         return self.ai_call(req, unit_id)
+
+    def _batching(self) -> bool:
+        """互いに依存しない依頼をまとめて送れるか（Batch の門がある場合だけ）。まとめない場合は従来どおり
+        1 件ずつ「確認（中断・時間の上限）→ 送信 → すぐ保存」する（途中で止まっても受け取った結果を失わない）。"""
+        return self.ai_call_many is not None and bool(self.sc.get("parallel_independent", True))
+
+    def _ai_many(self, items: list[tuple[AIRequest, int | None]]) -> list:
+        """互いに依存しない依頼をまとめて送る。戻り値は各依頼の応答か AIError（順序は items と同じ）。
+        まとめて送れない場合は1件ずつ（結果は同じ）。"""
+        if self.ai_stopped:
+            raise BudgetExceeded(self.ai_stopped)
+        if self.ai_call_many is not None and len(items) > 1 and self.sc.get("parallel_independent", True):
+            return self.ai_call_many(items)
+        out: list = []
+        for req, uid in items:
+            try:
+                out.append(self._ai(req, uid))
+            except AIError as e:
+                out.append(e)
+            except BudgetExceeded as e:  # 上限: 残りは送らない（呼び出し側は得られた結果を保存してから止める）
+                out += [e] * (len(items) - len(out))
+                break
+        return out
 
     # ================= local モード =================
     def _run_local(self, frow, scenes: list[Scene]) -> None:
@@ -319,6 +348,10 @@ class SemanticEngine:
         if d["step"] == "synthesis":
             self._synthesize(did, frow, scenes, version=1, changes=[])
             self._set_doc(did, step="reinterpret", round=0)
+        # 見本の比較（structlab pilot）用: 指定の段階の直前で止める（DB を複製して、その段階から先を方式ごとに実行する）
+        stop = self.sc.get("stop_before")
+        if stop == "reinterpret":
+            return
         d = self._doc_row(frow, "ai")
         if d["step"] == "reinterpret":
             self._reinterpret_loop(did, frow, scenes, int(d["round"] or 0))
@@ -328,6 +361,8 @@ class SemanticEngine:
             if not self._stage2_directives(did, frow, scenes):
                 return
             self._set_doc(did, step="verify")
+        if stop == "verify":
+            return
         d = self._doc_row(frow, "ai")
         if d["step"] == "verify":
             self._stage3_verify(did, frow, scenes, local_path)
@@ -509,6 +544,7 @@ class SemanticEngine:
                 tail = f"## 直前の場面の解釈\n{self._brief(prev) or '（なし）'}\n## 直後の場面の解釈\n{self._brief(nxt) or '（なし）'}\n"
                 head = f"{P.REINTERPRET_INSTRUCTION}\n## 資料\n{frow['path']}\n"
                 if self.prefix_layout:  # 候補（品質の比較で同等と確かめるまで既定では使わない）: 資料全体の理解を先頭に置いてキャッシュ
+                    # 再解釈は場面の順に1件ずつ送る（前の場面の結果を使う）ので、Batch の待ち時間をまたいで使い直せる 1 時間にする
                     text, cache_k = head + glob + scene_part + tail, len(head + glob)
                 else:
                     text, cache_k = head + scene_part + glob + tail, 0
@@ -516,7 +552,8 @@ class SemanticEngine:
                 try:
                     r = self._ai(AIRequest(task="scene_reinterpret", source_label=f"{frow['path']} {sc.label}", text=text,
                                            images=imgs, t_start=sc.t_start, t_end=sc.t_end, system=P.COMMON_SYSTEM,
-                                           schema=P.REINTERPRET_SCHEMA, cache_prefix_chars=0 if imgs else cache_k),
+                                           schema=P.REINTERPRET_SCHEMA, cache_prefix_chars=cache_k,
+                                           prefix_before_images=bool(imgs), cache_ttl="1h" if cache_k else ""),
                                  sc.unit_id)
                 except AIError as e:
                     self._mark(did, sc.unit_id, step, "failed", str(e))
@@ -540,6 +577,7 @@ class SemanticEngine:
             self._extract_rule_directives(did, frow, scenes, candidate=True)
         g = self._understanding(did)
         ctx_n = int(self.sc.get("directive_context_scenes", 1))
+        jobs: list = []
         for i, sc in enumerate(scenes):
             if not self._pending(did, sc.unit_id, "directives"):
                 continue
@@ -562,23 +600,40 @@ class SemanticEngine:
                     f"## 前後の場面（文脈）\n{chr(10).join(around) or '（なし）'}\n"
                     f"## 規則による候補（全件確認すること）\n{cand_txt}\n")
             imgs = [AIImage(p, lbl) for p, lbl in sc.images[:self.max_images]] if self.sc.get("directive_images") else []
-            try:
-                r = self._ai(AIRequest(task="directive_extraction", source_label=f"{frow['path']} {sc.label}", text=text,
-                                       images=imgs, t_start=sc.t_start, t_end=sc.t_end, system=P.COMMON_SYSTEM,
-                                       schema=P.DIRECTIVE_SCHEMA, cache_prefix_chars=0 if imgs else len(head)),
-                             sc.unit_id)
-            except AIError as e:
-                self._mark(did, sc.unit_id, "directives", "failed", str(e))
-                self.db.log_error(run_id=self.run_id, stage="semantic:directives", message=str(e), file_id=frow["id"],
-                                  unit_id=sc.unit_id)
+            req = AIRequest(task="directive_extraction", source_label=f"{frow['path']} {sc.label}", text=text, images=imgs,
+                            t_start=sc.t_start, t_end=sc.t_end, system=P.COMMON_SYSTEM, schema=P.DIRECTIVE_SCHEMA,
+                            cache_prefix_chars=0 if imgs else len(head))
+            if self._batching():
+                jobs.append((sc, cands, req))
                 continue
-            self._save_ai_directives(did, frow, scenes, sc, cands, r.data or {}, f"ai:{self.ai_name}:{r.model}")
-            self._mark(did, sc.unit_id, "directives", "ok")
+            try:
+                r = self._ai(req, sc.unit_id)
+            except AIError as e:
+                r = e
+            self._directive_result(did, frow, scenes, sc, cands, r)
+        # Batch の門がある場合: 場面ごとの依頼は互いの結果を使わない（材料は全体理解・場面の理解・元の発話・規則候補だけ）ので、
+        # まとめて送り、結果は場面の順に保存する（1件ずつ送る場合と依頼も保存の順序も同じ）
+        results = self._ai_many([(req, sc.unit_id) for sc, _, req in jobs]) if jobs else []
+        stop = next((r for r in results if isinstance(r, BudgetExceeded)), None)
+        for (sc, cands, _), r in zip(jobs, results):
+            if not isinstance(r, BudgetExceeded):  # 送っていないものは次回に持ち越し
+                self._directive_result(did, frow, scenes, sc, cands, r)
+        if stop is not None:
+            raise stop
         pending = [sc for sc in scenes if self._pending(did, sc.unit_id, "directives")]
         if pending:
             self._set_doc(did, note=f"{len(pending)} 場面の指示抽出が未完了（次回再試行）")
             return False
         return True
+
+    def _directive_result(self, did: int, frow, scenes, sc: Scene, cands, r) -> None:
+        if isinstance(r, AIError):
+            self._mark(did, sc.unit_id, "directives", "failed", str(r))
+            self.db.log_error(run_id=self.run_id, stage="semantic:directives", message=str(r), file_id=frow["id"],
+                              unit_id=sc.unit_id)
+            return
+        self._save_ai_directives(did, frow, scenes, sc, cands, r.data or {}, f"ai:{self.ai_name}:{r.model}")
+        self._mark(did, sc.unit_id, "directives", "ok")
 
     def _directive_from_ai(self, x: dict, sc: Scene, scenes: list[Scene], analyzer: str) -> dict | None:
         cls = x.get("directive_class")
@@ -718,9 +773,22 @@ class SemanticEngine:
                     self.checkpoint()
                     self._verify_group(did, frow, scenes, items[k:k + group], g, local_path)
         else:
+            # 指示ごとの照合は互いの結果を使わない（材料はその指示の行・元の発話・画面・全体理解だけ）ので、
+            # まとめて送り、結果は従来と同じ順に反映する
+            jobs = []
             for dir_id, issues in todo:
                 self.checkpoint()
-                self._verify_one(did, frow, scenes, dir_id, issues, g, local_path)
+                if not self._batching():  # まとめて送らない場合は従来どおり 1 件ずつ送ってすぐ保存
+                    self._verify_one(did, frow, scenes, dir_id, issues, g, local_path)
+                    continue
+                jobs.append(self._verify_request(did, frow, scenes, dir_id, issues, g, local_path))
+            results = self._ai_many([(req, d["unit_id"]) for d, _, req in jobs]) if jobs else []
+            for (d, issues, _), r in zip(jobs, results):
+                if not isinstance(r, BudgetExceeded):
+                    self._verify_apply(did, frow, scenes, d, issues, r)
+            stop = next((r for r in results if isinstance(r, BudgetExceeded)), None)
+            if stop is not None:
+                raise stop
         # 場面ごとの照合状態（網羅率の計算用）
         for sc in scenes:
             rows = self.db.q("SELECT verification FROM directives WHERE doc_id=? AND unit_id=? AND effective NOT IN "
@@ -730,6 +798,15 @@ class SemanticEngine:
 
     def _verify_one(self, did: int, frow, scenes: list[Scene], dir_id: int, issues: list[str], g: dict | None,
                     local_path: Path | None) -> None:
+        d, issues, req = self._verify_request(did, frow, scenes, dir_id, issues, g, local_path)
+        try:
+            r = self._ai(req, d["unit_id"])
+        except AIError as e:
+            r = e
+        self._verify_apply(did, frow, scenes, d, issues, r)
+
+    def _verify_request(self, did: int, frow, scenes: list[Scene], dir_id: int, issues: list[str], g: dict | None,
+                        local_path: Path | None):
         d = self.db.q1("SELECT * FROM directives WHERE id=?", (dir_id,))
         expand = float(self.sc.get("verify_expand_seconds", 45))
         win = window_lines(scenes, d["t_start"], d["t_end"], d["page"], expand)
@@ -745,18 +822,21 @@ class SemanticEngine:
                 f"## 指摘された問題点\n" + "\n".join(f"- {x}" for x in issues) +
                 f"\n## 元の発話・画面・資料（前後 {int(expand)} 秒／前後ページまで拡大）\n{_clip(lines_text(win), 20000) or '（なし）'}\n"
                 f"{extra_txt}\n")
-        if self.prefix_layout and not images:  # 候補（既定では使わない）
+        if self.prefix_layout_verify:  # 候補（既定では使わない）: 指示文と資料全体の理解を画像より前に置き、資料の全照合で共通にキャッシュ
             text, cache_k = head + glob + body, len(head + glob)
         else:
             text, cache_k = head + body + glob, 0
-        try:
-            r = self._ai(AIRequest(task="directive_verify", source_label=f"{frow['path']} 指示#{dir_id}", text=text,
-                                   images=images, t_start=d["t_start"], t_end=d["t_end"], system=P.COMMON_SYSTEM,
-                                   schema=P.VERIFY_SCHEMA, cache_prefix_chars=cache_k), d["unit_id"])
-        except AIError as e:
-            self._mark(did, dir_id, f"verify:{dir_id}", "failed", str(e))
+        return d, issues, AIRequest(task="directive_verify", source_label=f"{frow['path']} 指示#{dir_id}", text=text,
+                                    images=images, t_start=d["t_start"], t_end=d["t_end"], system=P.COMMON_SYSTEM,
+                                    schema=P.VERIFY_SCHEMA, cache_prefix_chars=cache_k,
+                                    prefix_before_images=bool(cache_k and images))
+
+    def _verify_apply(self, did: int, frow, scenes: list[Scene], d, issues: list[str], r) -> None:
+        dir_id = d["id"]
+        if isinstance(r, AIError):
+            self._mark(did, dir_id, f"verify:{dir_id}", "failed", str(r))
             self.db.x("UPDATE directives SET verification='needs_review', verification_notes=? WHERE id=?",
-                      (_j(issues + [f"照合のAI呼び出しに失敗: {e}"]), dir_id))
+                      (_j(issues + [f"照合のAI呼び出しに失敗: {r}"]), dir_id))
             return
         self._apply_verdict(did, frow, scenes, d, issues, r.data or {}, f"ai:{self.ai_name}:{r.model}")
         self._mark(did, dir_id, f"verify:{dir_id}", "ok")

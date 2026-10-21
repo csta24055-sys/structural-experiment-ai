@@ -5,10 +5,13 @@
 """
 from __future__ import annotations
 
+from collections import Counter
+
 import json
 from pathlib import Path
 
 from ..ai.base import AIImage, AIRequest
+from ..ai.tokens import tokens_for_size
 
 SYSTEM = """あなたは建築構造実験の授業資料（PDFのページ、講義動画の画面）を正確に書き起こす担当者です。
 解釈・要約・補足はせず、画像に見えている内容だけを構造化して書き起こしてください。
@@ -307,15 +310,14 @@ EST_ZOOM_OUTPUT_PER_IMAGE = 300
 
 
 def image_tokens(path: str | Path, max_edge: int = 2576) -> int:
-    """画像1枚の入力トークン（幅×高さ÷750。長辺が max_edge を超えると縮小されて送られる）。"""
-    from PIL import Image
-    try:
-        with Image.open(path) as im:
-            w, h = im.size
-    except OSError:
-        return EST_IMAGE_TOKENS
-    k = min(1.0, max_edge / max(w, h))
-    return int(w * k * h * k / 750) + 1
+    """画像1枚の入力トークン（公式の式 ⌈幅/28⌉×⌈高さ/28⌉。長辺 2576・4784 トークンを超えると縮小されて数えられる）。"""
+    from ..ai.tokens import image_tokens as _tok
+    return _tok(path, max_edge, default=EST_IMAGE_TOKENS)
+
+
+def _kind_family(kind: str) -> str:
+    """見積もりの依頼の種類から、同じ指示文（キャッシュの先頭部分）を持つまとまりの名前を返す。"""
+    return kind.rstrip("0123456789")
 
 
 def plan_requests(rec: dict) -> list[tuple[str, int, int, str]]:
@@ -350,7 +352,7 @@ def plan_requests(rec: dict) -> list[tuple[str, int, int, str]]:
             for k, evs in enumerate(chunks):
                 prev = None if k == 0 else chunks[k - 1][-1]["frame"]
                 sizes = D.planned_sizes(sc["frame"] if k == 0 else prev, [e["frame"] for e in evs], prev)
-                out.append((f"video_detail{len(evs)}", sum(int(w * h / 750) + 1 for w, h in sizes),
+                out.append((f"video_detail{len(evs)}", sum(tokens_for_size(w, h) for w, h in sizes),
                             600 + speech + min(len(sc.get("ocr") or ""), 3000) // 2, f"scene{sc['index']}_{k}", 0))
             # 第2段（AI が求めた範囲の拡大）の見込み: 部分ごとに EST_ZOOMS_PER_CHUNK か所（推測）、1 か所 EST_ZOOM_TOKENS
             nz = round(len(chunks) * EST_ZOOMS_PER_CHUNK)
@@ -368,14 +370,18 @@ def plan_requests(rec: dict) -> list[tuple[str, int, int, str]]:
 
 
 def estimate_plan(records: dict[str, dict], *, system_tokens: int = 1800, price_in: float = 4.0,
-                  price_out: float = 20.0, batch: bool = True, cache_hit: float = 0.5) -> dict:
+                  price_out: float = 20.0, batch: bool = True, cache_hit: float = 0.5, prefix_factor=None) -> dict:
     """最適化した構成での見積もり（資料ごと）。入力は画像の実寸から計算、出力は推測（EST_*）。
-    batch: Batch API で半額。cache_hit: 指示文がキャッシュから読まれる割合の仮定（Batch では保証されない）。"""
+    batch: Batch API で半額。cache_hit: 指示文がキャッシュから読まれる割合の仮定（Batch では保証されない）。
+    prefix_factor: 同じ先頭部分を持つ依頼の件数 n → 先頭部分 1 トークンあたりの平均の倍率（キャッシュの先書きの試算用）。
+    None なら cache_hit から（書き込み 1.25 倍・読み出し 0.05 倍）。"""
     rows, tot = [], {"calls": 0, "images_tokens": 0, "input_tokens": 0, "output_tokens": 0, "usd": 0.0}
     k = 0.5 if batch else 1.0
     for path, rec in records.items():
         r = {"path": path, "calls": 0, "input_tokens": 0, "output_tokens": 0, "usd": 0.0, "by_kind": {}}
-        for kind, img, text, _item, cached in plan_requests(rec):
+        plan = plan_requests(rec)
+        group_n = Counter(_kind_family(x[0]) for x in plan)
+        for kind, img, text, _item, cached in plan:
             if kind.startswith("experiment_group"):
                 n = int(kind[len("experiment_group"):])
                 out = EST_GROUP_OUTPUT_BASE + EST_GROUP_OUTPUT_PER_WINDOW * n
@@ -391,7 +397,9 @@ def estimate_plan(records: dict[str, dict], *, system_tokens: int = 1800, price_
                 out = EST_OUTPUT[kind]
             # キャッシュする先頭部分（指示文・基準画像）: 書き込み 1.25 倍・読み出し 0.05 倍。cache_hit は読み出しになる割合の仮定
             pre = system_tokens + cached
-            pre_in = pre * ((1 - cache_hit) * 1.25 + cache_hit * 0.05)
+            fam = _kind_family(kind)
+            factor = prefix_factor(group_n[fam]) if prefix_factor else (1 - cache_hit) * 1.25 + cache_hit * 0.05
+            pre_in = pre * factor
             usd = k * ((img + text + pre_in) * price_in + out * price_out) / 1e6
             r["calls"] += 1
             r["input_tokens"] += img + text + pre

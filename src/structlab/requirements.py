@@ -269,7 +269,7 @@ def check_auto(name: str, c: Ctx) -> tuple[str, str]:
         return _ok(bool(ok), "Batch API・実験区間 15 秒（3 枚）×4 区間まとめ・切り出しの構成", "2,350円構成の設定と違う")
     if name == "candidates_gated":
         sem = c.cfg.data.get("semantic", {})
-        on = [k for k, v in (("semantic.cache_layout", sem.get("cache_layout") == "prefix"),
+        on = [k for k, v in (("semantic.cache_layout", bool(sem.get("cache_layout"))),
                              ("semantic.verify_group", int(sem.get("verify_group", 1)) > 1),
                              ("reading.semantic_material", c.cfg.data.get("reading", {}).get("semantic_material") == "compact"))
               if v]
@@ -280,6 +280,15 @@ def check_auto(name: str, c: Ctx) -> tuple[str, str]:
         ok = bool(c.corpus and (Path(c.corpus) / "costs" / "costs.json").exists())
         return ("成功", "工程・依頼の種類ごとの費用と最適化ごとの効果を costs.json に記録") if ok else \
             ("未検証", "costs.json が無い（structlab cost を実行していない）")
+    if name in ("snapshot_before", "snapshot_after"):
+        tag = "before" if name == "snapshot_before" else "after"
+        root = Path(__file__).resolve().parents[2] / "snapshots"
+        found = [m for m in sorted(root.glob(f"{tag}-*/MANIFEST.json"))
+                 if (m.parent.parent / f"{m.parent.name}.tar.gz").exists()]
+        if not found:
+            return ("未実施", f"保存データ（snapshots/{tag}-*/ と .tar.gz）が無い")
+        m = json.loads(found[-1].read_text(encoding="utf-8"))
+        return "成功", f"{found[-1].parent.name}: コミット {m.get('commit', '')[:7]}、{len(m.get('files', []))} ファイル、作成 {m.get('created_at')}"
     if name == "notifications_excluded":
         return "要確認", "指示文で通知の書き起こしを禁止（仕組み）。出力ごとに通知が含まれていないかは人が確認"
     return "未検証", f"自動の確認 {name} は未実装"

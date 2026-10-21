@@ -23,22 +23,55 @@ CELL = re.compile(r"\b[A-Z]{1,3}\$?\d{1,5}\b")
 CRITICAL_CLASSES = {"prohibited", "mandatory", "conditional"}
 
 CANDIDATES = [
-    {"id": "C1", "config": {"semantic.cache_layout": "prefix"},
-     "what": "意味理解の再解釈・照合で、資料全体の理解を依頼の先頭に置いてキャッシュする（内容は同じ、順序だけ変わる）",
-     "sample": "事前説明1（8 場面）の意味理解の全段階", "kind": "semantic",
-     "saving": "資料全体の理解（最大 2 万字）を毎回送る約 400 件の依頼で、その部分の入力が約 1/10 になる"},
-    {"id": "C2", "config": {"reading.semantic_material": "compact"},
+    {"id": "C1", "config": {"semantic.cache_layout": "prefix"}, "opts": {"prefix_layout": True},
+     "what": "意味理解の再解釈・照合で、指示文と資料全体の理解を依頼の先頭（照合では画像より前）に置いてキャッシュする"
+             "（内容は同じ、順序だけ変わる）。再解釈は場面の順に送るので 1 時間のキャッシュ",
+     "sample": "事前説明1", "kind": "semantic",
+     "saving": "資料全体の理解（最大 2 万字）を毎回送る再解釈・照合の依頼で、その部分の入力が約 1/7〜1/20 になる"},
+    {"id": "C2", "config": {"reading.semantic_material": "compact"}, "opts": {"compact": True},
      "what": "読み取り結果を意味理解に渡すとき、JSON の括弧・引用符を省いた短い書き方にする（キー・値はすべて残す）",
-     "sample": "事前説明1 の意味理解の全段階", "kind": "semantic", "saving": "場面の材料の入力が 1〜2 割減る"},
-    {"id": "C4", "config": {"semantic.verify_group": 5},
+     "sample": "事前説明1", "kind": "semantic", "saving": "場面の材料の入力が 1〜2 割減る"},
+    {"id": "C4", "config": {"semantic.verify_group": 5}, "opts": {"verify_group": 5},
      "what": "第3回の照合で、同じ場面の指示（最大 5 件）を1回でまとめて照合する（画面・範囲は各指示の分を合わせる）",
-     "sample": "エクセルの作り方1 の照合対象（約 30 件）", "kind": "semantic",
+     "sample": "事前説明1", "kind": "semantic",
      "saving": "照合の依頼が約 6 割減り、同じ画面・資料全体の理解を何度も送らない"},
-    {"id": "C3", "config": {"reading.roles[experiment].group": 1},
+    {"id": "C3", "config": {"reading.roles[experiment].group": 1}, "opts": None,
      "what": "（逆方向の確認）実験区間を4つずつまとめて読む今の構成が、区間ごとに読む方式と同等かを確かめる",
-     "sample": "先生2 の 8 区間", "kind": "reading",
+     "sample": "鋼材実験経過先生2", "kind": "reading",
      "saving": "同等でなければ区間ごとに戻す（費用は増えるが品質を優先。指示 P085 の矛盾の解消）"},
 ]
+
+
+#: 段階を分けた比較の対象（候補 → 費用モデルの設定）
+ARM_OPTS = {"C1v": {"prefix_layout": True, "layout_scope": "verify"}, "C4": {"verify_group": 5},
+            "C1v+C4": {"prefix_layout": True, "layout_scope": "verify", "verify_group": 5},
+            "C1r": {"prefix_layout": True, "layout_scope": "reinterpret"}, "C2": {"compact": True}}
+#: 段階ごとに、比較で実行し直す工程（費用モデルの行の名前）
+STAGE_ROWS = {"verify": ("3 元資料との照合",),
+              "reinterpret": ("1 再解釈", "1 全体の理解", "2 指示の抽出", "3 元資料との照合"),
+              "all": None}
+
+
+def plan_costs(db_path: Path | None, sample: str = "事前説明1") -> list[dict]:
+    """候補ごとの、見本の比較にかかる追加の費用と本番 1 回あたりの削減（mid）。
+    段階を分けた比較（branch_run）: 本番の今の方式の 1 回はそのまま使い、「今の方式をもう 1 回」と「候補」の 2 回分が追加。
+    全工程の比較: 今の方式×2＋候補（本番とは別）。"""
+    from . import costmodel as CM
+    if not (db_path and Path(db_path).exists()):
+        return []
+    full = CM.semantic(db_path, "mid")["yen"]
+    out = []
+    for arm, opts in ARM_OPTS.items():
+        stage = ARMS.get(arm, {}).get("stage", "all")
+        rows = STAGE_ROWS[stage]
+        base = CM.semantic(db_path, "mid", only=sample)["rows"]
+        cand = CM.semantic(db_path, "mid", only=sample, **opts)["rows"]
+        part = (lambda r: sum(v["yen"] for k, v in r.items() if rows is None or k in rows))
+        extra = part(base) + part(cand) if rows is not None else 2 * part(base) + part(cand)
+        saving = full - CM.semantic(db_path, "mid", **opts)["yen"]
+        out.append({"arm": arm, "stage": stage, "sample": sample, "pilot_extra_yen": round(extra),
+                    "saving_per_run_yen": round(saving), "net_after_one_run_yen": round(saving - extra)})
+    return out
 
 
 def _norm(s: str) -> str:
@@ -67,13 +100,19 @@ def reading_items(ai: dict | None) -> dict[str, set[str]]:
     return {k: {v for v in s if v} for k, s in out.items()}
 
 
+VERIFY_VERDICTS = {"verified", "revised", "rejected", "needs_review", "class_mismatch_unresolved", "found_in_verify"}
+
+
 def semantic_items(directives: list[dict]) -> dict[str, set[str]]:
-    out: dict[str, set[str]] = {"critical": set(), "directive": set()}
+    """指示の一覧から比べる項目。照合（第3回）の判定も比べる（照合の段階だけを比べる見本で使う）。"""
+    out: dict[str, set[str]] = {"critical": set(), "directive": set(), "verdict": set()}
     for d in directives:
         key = f"{d.get('class')}|{_norm(d.get('content'))}"
         out["directive"].add(key)
         if d.get("class") in CRITICAL_CLASSES:
             out["critical"].add(key)
+        if d.get("verification") in VERIFY_VERDICTS:
+            out["verdict"].add(f"{key}|{d.get('verification')}")
     return out
 
 
@@ -131,9 +170,56 @@ def load_reading(d: Path) -> dict[str, set[str]]:
 
 def load_semantic(d: Path) -> dict[str, set[str]]:
     f = next(iter(sorted(Path(d).rglob("directives.json"))), None)
-    return semantic_items(json.loads(f.read_text(encoding="utf-8"))) if f else {"critical": set(), "directive": set()}
+    return semantic_items(json.loads(f.read_text(encoding="utf-8"))) if f else {"critical": set(), "directive": set(),
+                                                                                  "verdict": set()}
 
 
 def compare(kind: str, baseline: Path, repeat: Path, candidate: Path, tol: float = 0.02) -> dict:
     load = load_reading if kind == "reading" else load_semantic
     return decide(kind, load(baseline), load(repeat), load(candidate), tol)
+
+
+# ---------------- 段階を分けた見本の比較（費用を抑える） ----------------
+#: 候補が影響する最初の段階。その直前まで本番どおりに進めた意味理解の DB を複製し、その段階から先だけを
+#: 「今の方式（もう 1 回）」と「候補」で実行して比べる。本番の 1 回目（今の方式）はそのまま本番の結果に使う
+ARMS = {
+    "C1v": {"stage": "verify", "semantic": {"cache_layout": "prefix_verify"}},
+    "C4": {"stage": "verify", "semantic": {"verify_group": 5}},
+    "C1v+C4": {"stage": "verify", "semantic": {"cache_layout": "prefix_verify", "verify_group": 5}},
+    "C1r": {"stage": "reinterpret", "semantic": {"cache_layout": "prefix_reinterpret"}},
+}
+
+
+def branch_run(cfg, db_path: Path, record: dict, arm: str | None, out: Path, provider, log=print) -> Path:
+    """見本の資料 1 件について、DB を複製して指定の段階から先を実行する（arm=None なら今の方式）。
+    有料（provider が外部 AI）。利用者の承認後にだけ使う。戻り値: その実行の出力フォルダ（semantic/directives.json を含む）。"""
+    import copy
+    import shutil
+    from .reading.semantic_bridge import run_semantic
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(db_path, out / "semantic.db")
+    c2 = copy.copy(cfg)
+    sem = {**cfg.data.get("semantic", {}), "stop_before": None}
+    if arm:
+        sem.update(ARMS[arm]["semantic"])
+    c2.data = {**cfg.data, "semantic": sem}
+    run_semantic(c2, out, {record["path"]: record}, provider, batch=bool(cfg.data.get("reading", {}).get("batch")), log=log)
+    return out
+
+
+def branch_compare(cfg, db_path: Path, record: dict, arm: str, out: Path, provider, log=print) -> dict:
+    """段階を分けた比較を 1 回で行う: 今の方式で 2 回（baseline・repeat）と候補（candidate）を実行して比べる。
+    baseline は本番の結果としてそのまま使う（追加の費用は repeat と candidate の 2 回分）。
+    有料。利用者の承認後にだけ使う。結果は out/pilot_decision.json。"""
+    base = branch_run(cfg, db_path, record, None, out / "baseline", provider, log)
+    rep = branch_run(cfg, db_path, record, None, out / "repeat", provider, log)
+    cand = branch_run(cfg, db_path, record, arm, out / "candidate", provider, log)
+    res = compare("semantic", base, rep, cand)
+    res.update(arm=arm, sample=record["path"], stage=ARMS[arm]["stage"], config=ARMS[arm]["semantic"])
+    # 今の方式の 1 回目（baseline）は本番の結果としてそのまま使う: 本番の DB をその DB で置き換える（元は .before_pilot に残す）。
+    # 本番を再開すると、見本の資料は照合済みとして扱われ、ほかの資料だけが続きから進む（見本の資料の照合を二重に払わない）
+    import shutil
+    shutil.copy2(db_path, Path(str(db_path) + ".before_pilot"))
+    shutil.copy2(base / "semantic.db", db_path)
+    (out / "pilot_decision.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+    return res

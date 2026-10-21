@@ -150,7 +150,9 @@ jobs:
       - name: Restore earlier meaning results (resume; identical inputs are not sent again)
         uses: actions/cache/restore@v4
         with:
-          path: corpus/semantic_run/semantic.db
+          path: |
+            corpus/semantic_run/semantic.db
+            corpus/semantic_run/semantic_batch_state.json
           key: semantic-${{ github.run_id }}
           restore-keys: |
             semantic-
@@ -163,13 +165,20 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: corpus/semantic_run/semantic.db
+          path: |
+            corpus/semantic_run/semantic.db
+            corpus/semantic_run/semantic_batch_state.json
           key: semantic-${{ github.run_id }}
       - name: Cost breakdown (where the cost arises; no API calls)
         if: always()
         run: |
           python -m structlab -c "$STRUCTLAB_CONFIG" cost --reading results --semantic-db corpus/semantic_run/semantic.db \
             --out corpus/costs | tee -a "$GITHUB_STEP_SUMMARY" || true
+      - name: GitHub Actions usage (minutes of this run; counted as cost)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/actions_usage.py --out corpus/costs/actions_usage.json | tee -a "$GITHUB_STEP_SUMMARY" || true
       - name: Requirements ledger (user instructions + teacher directives)
         if: always()
         run: |

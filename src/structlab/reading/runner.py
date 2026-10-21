@@ -256,7 +256,8 @@ class Reader:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"model": res.model, "input_tokens": res.input_tokens,
                                         "output_tokens": res.output_tokens, "batch": True, "req_hash": request_hash(req),
-                                        "cache_read_tokens": getattr(res, "cache_read_tokens", 0), "data": res.data},
+                                        "cache_read_tokens": getattr(res, "cache_read_tokens", 0),
+                                        "cache_write_tokens": getattr(res, "cache_write_tokens", 0), "data": res.data},
                                        ensure_ascii=False, indent=1), encoding="utf-8")
         return len(pending)
 

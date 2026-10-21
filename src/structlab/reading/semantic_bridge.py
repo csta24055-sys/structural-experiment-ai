@@ -156,11 +156,14 @@ class BatchGate:
     """複数のスレッド（資料ごとの意味理解）からの AI 呼び出しを集め、全員が待ちになったら Batch API でまとめて送る。
     各資料の処理の順序（前の場面の理解を次の場面に渡すなど）はそのまま。"""
 
-    def __init__(self, provider, log=print):
+    def __init__(self, provider, log=print, state_path: Path | None = None):
         self.provider = provider
         self.log = log
+        #: 送信した Batch の ID を依頼の指紋とともに保存する（中断後の再実行で、同じ依頼の集まりなら送り直さずに結果を取りに行く）
+        self.state_path = state_path
         self.lock = threading.Lock()
         self.active = 0
+        self.parties = 0  # 待っているスレッドの数（1 スレッドが複数の依頼をまとめて待つことがある）
         self.waiting: list[tuple] = []
 
     def enter(self):
@@ -174,28 +177,70 @@ class BatchGate:
         self._send(batch)
 
     def call(self, req):
-        ev = threading.Event()
-        slot: dict = {}
+        r = self.call_many([req])[0]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def call_many(self, reqs: list) -> list:
+        """1つのスレッドから、互いに依存しない複数の依頼をまとめて待つ（スレッドとしては 1 人分の待ち）。
+        戻り値は各依頼の応答か例外。"""
+        evs = []
         with self.lock:
-            self.waiting.append((req, ev, slot))
+            self.parties += 1
+            for req in reqs:
+                ev, slot = threading.Event(), {}
+                self.waiting.append((req, ev, slot))
+                evs.append((ev, slot))
             batch = self._take()
         self._send(batch)
-        ev.wait()
-        if "error" in slot:
-            raise slot["error"]
-        return slot["resp"]
+        for ev, _ in evs:
+            ev.wait()
+        return [slot.get("error", slot.get("resp")) for _, slot in evs]
 
     def _take(self):
-        if self.waiting and len(self.waiting) >= self.active:
-            batch, self.waiting = self.waiting, []
+        if self.waiting and self.parties >= self.active:
+            batch, self.waiting, self.parties = self.waiting, [], 0
             return batch
         return None
+
+    def _state(self) -> dict:
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_state(self, st: dict) -> None:
+        if self.state_path:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
 
     def _send(self, batch):
         if not batch:
             return
+        import hashlib
+        from .runner import request_hash
+        hashes = [request_hash(b[0]) for b in batch]
+        key = hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()[:24]
+        prev = self._state().get(key)
+        if prev and sorted(prev.get("order", [])) == sorted(hashes):
+            # 前回送った同じ依頼の集まり: 前回と同じ順序に並べ直して、送信済みの Batch の結果を取りに行く
+            pos = {h: i for i, h in enumerate(prev["order"])}
+            batch = sorted(batch, key=lambda b: pos[request_hash(b[0])])
+            hashes = prev["order"]
+            known = {int(k): v for k, v in prev.get("batches", {}).items()}
+        else:
+            known = {}
+
+        def created(base, bid):
+            st = self._state()
+            st.setdefault(key, {"order": hashes, "batches": {}})["batches"][str(base)] = bid
+            self._save_state(st)
         try:
-            res = self.provider.analyze_batch([b[0] for b in batch], log=self.log)
+            res = self.provider.analyze_batch([b[0] for b in batch], log=self.log, known=known or None, on_created=created)
+            st = self._state()
+            st.pop(key, None)
+            self._save_state(st)
         except Exception as e:  # noqa: BLE001
             res = [e] * len(batch)
         for (req, ev, slot), r in zip(batch, res):
@@ -231,7 +276,8 @@ def run_semantic(cfg, out: Path, records: dict[str, dict], provider=None, *, bat
             log(f"意味理解の見積もりに失敗: {type(e).__name__}: {e}")
     usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "failed": 0}
     ulock = threading.Lock()
-    gate = BatchGate(provider, log) if (provider is not None and batch and hasattr(provider, "analyze_batch")) else None
+    gate = BatchGate(provider, log, out / "semantic_batch_state.json") \
+        if (provider is not None and batch and hasattr(provider, "analyze_batch")) else None
 
     def make_call(tdb):
         def call(req, uid):
@@ -245,20 +291,43 @@ def run_semantic(cfg, out: Path, records: dict[str, dict], provider=None, *, bat
                 with ulock:
                     usage["failed"] += 1
                 raise AIError(f"{type(e).__name__}: {e}", retryable=True) from e
-            with ulock:
-                usage["calls"] += 1
-                usage["input_tokens"] += resp.input_tokens
-                usage["output_tokens"] += resp.output_tokens
-            tdb.x("INSERT INTO api_usage(run_id,unit_id,provider,model,input_tokens,output_tokens,images,ok,created_at)"
-                  " VALUES(NULL,?,?,?,?,?,?,1,?)", (uid, getattr(provider, "name", "ai"), resp.model, resp.input_tokens,
-                                                   resp.output_tokens, len(req.images), time.time()))
+            record(tdb, req, uid, resp)
             return resp
         return call
+
+    def record(tdb, req, uid, resp):
+        with ulock:
+            usage["calls"] += 1
+            usage["input_tokens"] += resp.input_tokens
+            usage["output_tokens"] += resp.output_tokens
+        tdb.x("INSERT INTO api_usage(run_id,unit_id,provider,model,input_tokens,output_tokens,images,ok,created_at)"
+              " VALUES(NULL,?,?,?,?,?,?,1,?)", (uid, getattr(provider, "name", "ai"), resp.model, resp.input_tokens,
+                                               resp.output_tokens, len(req.images), time.time()))
+
+    def make_call_many(tdb):
+        """互いに依存しない依頼をまとめて送る（Batch の 1 回に入る）。"""
+        if gate is None:
+            return None
+
+        def call_many(items):
+            res = gate.call_many([req for req, _ in items])
+            out = []
+            for (req, uid), r in zip(items, res):
+                if isinstance(r, Exception):
+                    with ulock:
+                        usage["failed"] += 1
+                    out.append(r if isinstance(r, AIError) else AIError(f"{type(r).__name__}: {r}", retryable=True))
+                else:
+                    record(tdb, req, uid, r)
+                    out.append(r)
+            return out
+        return call_many
 
     def work(fid):
         tdb = DB(dbp)
         try:
             eng = SemanticEngine(pcfg, tdb, ai_call=make_call(tdb) if provider is not None else None,
+                                 ai_call_many=make_call_many(tdb) if provider is not None else None,
                                  ai_name=getattr(provider, "name", "") if provider else "")
             frow = tdb.q1("SELECT * FROM files WHERE id=?", (fid,))
             log(f"意味理解: {frow['path']}")

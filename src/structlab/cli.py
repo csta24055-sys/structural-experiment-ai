@@ -653,6 +653,34 @@ def cmd_pilot(args) -> int:
     if args.action == "plan":
         for c in PL.CANDIDATES:
             print(f"{c['id']}: {c['what']}\n  設定: {c['config']} / 見本: {c['sample']} / 見込み: {c['saving']}")
+        rows = PL.plan_costs(Path(args.semantic_db) if args.semantic_db else None)
+        if rows:
+            print("\n見本の比較の追加費用と、本番 1 回あたりの削減（mid、円）:")
+            for r in rows:
+                print(f"  {r['arm']}（{r['stage']} から先を比較、見本 {r['sample']}）: 比較 約 {r['pilot_extra_yen']:,} / "
+                      f"削減 約 {r['saving_per_run_yen']:,} / 本番 1 回で差し引き {r['net_after_one_run_yen']:+,}")
+        return 0
+    if args.action == "branch":  # 有料: 見本の資料で、指定の段階から先を今の方式×2・候補×1 で実行して比べる
+        if not args.allow_external_ai:
+            print("有料の比較です。利用者の承認後に --allow-external-ai を付けて実行してください")
+            return 1
+        from .ai import make_provider
+        cfg = load_config(args.config)
+        provider, why = make_provider(cfg, allow_external_flag=True)
+        if provider is None:
+            print(f"AI を使えません: {why}")
+            return 1
+        rec = None
+        for d in args.records or []:
+            for rp in Path(d).rglob("reading.json"):
+                r = json.loads(rp.read_text(encoding="utf-8"))
+                if args.sample in r.get("path", ""):
+                    rec = r
+        if rec is None:
+            print(f"見本の資料 {args.sample} の読み取り結果がありません")
+            return 1
+        res = PL.branch_compare(cfg, Path(args.semantic_db), rec, args.arm, Path(args.out), provider)
+        print(("採用" if res["adopt"] else "不採用（今の方式のまま）") + f": {json.dumps(res, ensure_ascii=False)[:600]}")
         return 0
     res = PL.compare(args.kind, Path(args.baseline), Path(args.repeat), Path(args.candidate), args.tolerance)
     out = Path(args.out)
@@ -755,13 +783,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--semantic-db")
     p.add_argument("--out", default="work/costs")
     p = sub.add_parser("pilot", help="費用を下げる候補が今の方式と同じ品質かを比べる（採用の判断）")
-    p.add_argument("action", choices=["plan", "compare"])
+    p.add_argument("action", choices=["plan", "compare", "branch"])
+    p.add_argument("--arm", default="C1v+C4", help="branch: 比べる候補（C1v / C4 / C1v+C4 / C1r）")
+    p.add_argument("--sample", default="事前説明1", help="branch: 見本の資料（パスの一部）")
+    p.add_argument("--records", nargs="*", help="branch: 読み取り結果のフォルダ")
+    p.add_argument("--allow-external-ai", action="store_true", help="branch: 有料の比較を実行する（承認後だけ）")
     p.add_argument("--kind", choices=["reading", "semantic"], default="semantic")
     p.add_argument("--baseline")
     p.add_argument("--repeat")
     p.add_argument("--candidate")
     p.add_argument("--tolerance", type=float, default=0.02)
     p.add_argument("--out", default="work/pilot")
+    p.add_argument("--semantic-db", help="plan: 見本の比較にかかる費用を計算する意味理解の DB（semantic.db）")
     p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")
     p.add_argument("--no-download", action="store_true", help="動画・PDF・Excel の見本の取得を省略")
     p.add_argument("--no-claude", action="store_true")

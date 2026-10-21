@@ -130,3 +130,67 @@ def test_anthropic_refusal_and_bad_json():
         with pytest.raises(AIError) as e:
             AnthropicProvider(client=client).analyze(AIRequest(task="image", source_label="x", text=""))
         assert e.value.retryable is retry
+
+
+def _strip_cache(x):
+    if isinstance(x, dict):
+        return {k: _strip_cache(v) for k, v in x.items() if k != "cache_control"}
+    if isinstance(x, list):
+        return [_strip_cache(v) for v in x]
+    return x
+
+
+def test_batch_cache_priming_changes_only_cache_settings_and_order(tmp_path):
+    """同じ先頭部分（長い指示文）を持つ依頼が多いときだけ、1件を先に送ってキャッシュを書き（1 時間）、残りを後で送る。
+    各依頼の中身（モデル・指示文・本文・画像・出力の設定）は先書きしない場合と1文字も変わらない。"""
+    from structlab.ai.anthropic_provider import PRIME_MIN_GROUP
+    p = AnthropicProvider(client=SimpleNamespace())
+    long_sys = "建築構造実験の資料を正確に読む。" * 60
+    many = [AIRequest(task="t", source_label=f"s{i}", text=f"本文{i}", system=long_sys, schema={"type": "object"})
+            for i in range(PRIME_MIN_GROUP + 2)]
+    phases, params = p.batch_plan(many)
+    assert phases == [[0], list(range(1, len(many)))]
+    assert all(pp["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"} for pp in params)
+    assert [_strip_cache(pp) for pp in params] == [_strip_cache(p._params(r)) for r in many]
+    few = many[:PRIME_MIN_GROUP - 1]
+    phases, params = p.batch_plan(few)                 # 少ないときは従来どおり 1 回、5 分のキャッシュ
+    assert phases == [list(range(len(few)))] and params == [p._params(r) for r in few]
+    short = [AIRequest(task="t", source_label="s", text=f"本文{i}", system="短い指示", schema={"type": "object"})
+             for i in range(PRIME_MIN_GROUP + 2)]
+    assert len(p.batch_plan(short)[0]) == 1           # 512 トークン未満の先頭部分はキャッシュされないので先書きしない
+    mixed = many + [AIRequest(task="t", source_label="x", text="別", system="別の指示" * 300, schema={"type": "object"})]
+    phases, _ = p.batch_plan(mixed)
+    assert phases[0] == [0] and len(mixed) - 1 in phases[1]
+
+
+def test_batch_priming_sends_first_phase_before_the_rest(tmp_path):
+    from structlab.ai.anthropic_provider import PRIME_MIN_GROUP
+    order = []
+
+    class Batches:
+        def __init__(self):
+            self.made = {}
+
+        def create(self, requests):
+            bid = f"b{len(self.made)}"
+            self.made[bid] = requests
+            order.append([r["custom_id"] for r in requests])
+            return SimpleNamespace(id=bid, processing_status="in_progress")
+
+        def retrieve(self, bid):
+            return SimpleNamespace(id=bid, processing_status="ended")
+
+        def results(self, bid):
+            for r in self.made[bid]:
+                msg = SimpleNamespace(content=[SimpleNamespace(type="text", text='{"ok": 1}')], stop_reason="end_turn",
+                                      usage=SimpleNamespace(input_tokens=10, output_tokens=2, cache_read_input_tokens=0,
+                                                            cache_creation_input_tokens=0), model="m")
+                yield SimpleNamespace(custom_id=r["custom_id"], result=SimpleNamespace(type="succeeded", message=msg))
+    p = AnthropicProvider(client=SimpleNamespace(messages=SimpleNamespace(batches=Batches())))
+    reqs = [AIRequest(task="t", source_label=f"s{i}", text=f"本文{i}", system="長い指示文。" * 200, schema={"type": "object"})
+            for i in range(PRIME_MIN_GROUP + 1)]
+    created = {}
+    res = p.analyze_batch(reqs, poll_seconds=0, log=lambda m: None, on_created=lambda b, i: created.update({b: i}))
+    assert order[0] == ["r0"] and order[1] == [f"r{i}" for i in range(1, len(reqs))]
+    assert all(r.data == {"ok": 1} for r in res)
+    assert sorted(created) == [0, 1_000_000]          # 中断後の再開用の番号（段階ごと）
