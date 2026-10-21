@@ -85,6 +85,39 @@ def sample_gray_frames(path: Path, start: float, length: float, interval: float,
     return frames
 
 
+def iter_gray_frames(path: Path, start: float, length: float, interval: float, w: int, h: int,
+                     crop: str | None = None):
+    """sample_gray_frames と同じだが1枚ずつ返す（細かい間隔で長い動画を見てもメモリを使わない）。"""
+    vf = f"fps=1/{interval}," + (f"{crop}," if crop else "") + f"scale={w}:{h},format=gray"
+    proc = subprocess.Popen(
+        ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(path),
+         "-vf", vf, "-f", "rawvideo", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    size = w * h
+    i = 0
+    assert proc.stdout is not None
+    try:
+        while True:
+            buf = proc.stdout.read(size)
+            if len(buf) < size:
+                break
+            yield start + i * interval, np.frombuffer(buf, dtype=np.uint8).reshape(h, w)
+            i += 1
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+
+def save_lossless(src_png: Path) -> Path:
+    """ffmpeg で取り出した PNG を WebP（可逆）にする。元の画素は1つも変えずに容量を小さくする。"""
+    from PIL import Image
+    out = src_png.with_suffix(".webp")
+    with Image.open(src_png) as im:
+        im.save(out, lossless=True, method=4)
+    src_png.unlink(missing_ok=True)
+    return out
+
+
 def scene_scores(frames: list[tuple[float, np.ndarray]], pixel_delta: int = 24) -> list[float]:
     """直前のサンプルから「明るさが pixel_delta 以上変わった画素の割合」(0〜1)。
     画面録画では文字やセルだけが変わることが多いので、平均差分ではなく変化画素の割合を使う。"""

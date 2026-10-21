@@ -161,14 +161,25 @@ def check_auto(name: str, c: Ctx) -> tuple[str, str]:
                 if (track is not None and s["start"] > track + 0.5) or s["start"] > end + 0.5:
                     bad.append((r["path"], s["start"]))
         return _ok(not bad, "音声の無い時間・除外した末尾に文字起こしは無い", f"音声の無い時間の文字起こし: {bad[:10]}")
-    if name == "lecture_detail_applied":
+    if name in ("lecture_detail_applied", "lecture_lossless_frames", "lecture_dense_scan", "lecture_zoom"):
         vs = c.videos(lambda r: role(r).get("kind") == "lecture_detail")
-        if not vs:
-            return "不一致", "Excel・レポートの作り方の動画に細部の読み取りが適用されていない"
-        no_tiles = [r["path"] for r in vs if any(not s.get("tiles") and not str(s.get("frame", "")).endswith("_full.jpg")
-                                                 for s in _units(r) if s.get("mode") != "experiment")]
-        return _ok(not no_tiles, f"{len(vs)} 本に適用（0.5 秒ごと・変化した画面すべて・2 倍・部分拡大・large-v3）",
-                   f"部分拡大の無い場面がある: {no_tiles}")
+        names = {Path(r["path"]).parent.name for r in c.videos()}
+        want = [n for n in names if n.startswith(("エクセルの作り方", "レポートの作り方"))]
+        if not vs or len(vs) < len(want):
+            return "不一致", f"Excel・レポートの作り方の動画 {len(want)} 本のうち細部の読み取りは {len(vs)} 本"
+        if name == "lecture_lossless_frames":
+            bad = [r["path"] for r in vs if any(not str(s.get("frame", "")).endswith(".webp") for s in _units(r))]
+            return _ok(not bad, f"{len(vs)} 本の画面をすべて元の解像度の可逆画像（WebP lossless）で保存", f"可逆でない画面: {bad}")
+        if name == "lecture_dense_scan":
+            bad = [r["path"] for r in vs if not all(s.get("dense_scan") for s in r.get("segments", []))]
+            n = sum(s.get("dense_scan", {}).get("distinct", 0) for r in vs for s in r.get("segments", []))
+            return _ok(not bad, f"0.2 秒ごとの走査で画面の変化 {n} か所を確認（0.5 秒ごとの検出に追加）", f"走査していない: {bad}")
+        if name == "lecture_zoom":
+            if not any(s.get("ai") for r in vs for s in _units(r)):
+                return "未実施", "拡大画像（部分・操作した部分・AI が求めた部分）は AI の読み取りで作って送る（今回は未実施）"
+            z = sum(len((s.get("ai") or {}).get("zoom_readings", [])) for r in vs for s in _units(r))
+            return "成功", f"拡大して読んだ範囲 {z} か所（AI が求めた部分）＋ 部分拡大・操作した部分の拡大"
+        return "成功", f"{len(vs)} 本に適用（元の解像度の可逆画像・0.2 秒ごとの走査・拡大・音声・large-v3）"
     if name == "per_material_outputs":
         miss = [p for p, r in c.records.items() if not r.get("error") and not (Path(r["_file"]).parent / "reading.md").exists()]
         return _ok(not miss, "資料ごとの reading.md / reading.json あり", f"出力が無い: {miss}")

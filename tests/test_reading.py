@@ -272,7 +272,7 @@ def test_reading_workflow_is_readonly_and_ai_gated():
     # 設定ファイルの work_dir は configs/ からの相対パスになるため、成果物として保存する場所を明示する
     assert "--out work/reading" in run
     up = next(s for s in d["jobs"]["read"]["steps"] if s.get("uses", "").startswith("actions/upload-artifact"))
-    assert up["with"]["path"] == "work/reading" and up["with"]["retention-days"] <= 30
+    assert up["with"]["path"].split()[0] == "work/reading" and up["with"]["retention-days"] <= 30
     assert "GH_SECRETS_TOKEN" not in text and "echo $DROPBOX" not in text
 
 
@@ -396,17 +396,14 @@ def test_orientation_runs_detect_sideways_screen_and_ignore_blips():
 
 def test_frame_size_native_and_detail():
     from structlab.media import Region
-    from structlab.reading.video_read import frame_size, tile_regions
+    from structlab.reading.video_read import frame_size
     # 通常（2,350円構成）: 切り出しは元の解像度（長辺 1000 未満は拡大）、画面全体は 1568
     assert frame_size(Region(0, 0, 1920, 1080, 1920, 1080)) == {"max_width": 1568, "min_width": 0}
     assert frame_size(Region(10, 10, 1196, 670, 2532, 1170)) == {"max_width": 1196, "min_width": 0}
     assert frame_size(Region(10, 10, 886, 514, 2532, 1170)) == {"max_width": 1000, "min_width": 1000}
-    # Excel・レポートの作り方: 資料の部分を 2 倍（最大 2576）
-    assert frame_size(Region(10, 10, 928, 612, 2532, 1170), "detail") == {"max_width": 1856, "min_width": 1856}
-    assert frame_size(Region(0, 0, 2532, 1170, 2532, 1170), "detail")["max_width"] == 2576
-    tiles = tile_regions(Region(100, 200, 900, 600, 2532, 1170))
-    assert len(tiles) == 4 and tiles[0].x == 100 and tiles[3].x + tiles[3].w == 1000 and tiles[3].y + tiles[3].h == 800
-    assert tiles[0].w > 450 and tiles[0].h > 300  # 境目が切れないよう重ねる
+    # Excel・レポートの作り方: 元の解像度のまま保存（拡大は送るときに元の画素から作る）
+    assert frame_size(Region(10, 10, 928, 612, 2532, 1170), "detail") == {"max_width": 928, "min_width": 0}
+    assert frame_size(Region(0, 0, 2532, 1170, 2532, 1170), "detail")["max_width"] == 2532
 
 
 def test_experiment_windows_are_read_one_by_one_by_default():
@@ -509,41 +506,113 @@ def test_detail_keeps_every_distinct_change():
     assert kept == [0.5, 1.5, 2.0]  # 0.5 秒だけ出た画面も残し、同じ画面の繰り返しだけ除く
 
 
-def test_detail_requests_split_and_merge(tmp_path):
+def _sheet(path, seed=0, blank_right=False, mark=None):
+    """表計算の画面に似た画像（罫線と数字）。"""
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (400, 240), "white")
+    d = ImageDraw.Draw(im)
+    for y in range(20, 240, 20):
+        d.line((0, y, 200 if blank_right else 400, y), fill="gray")
+    for x in range(0, 200 if blank_right else 400, 50):
+        d.line((x, 0, x, 240), fill="gray")
+    for r in range(1, 10):
+        d.text((5, 20 * r + 4), f"{r * 1.5 + seed:.2f}", fill="black")
+    if mark:
+        d.rectangle(mark, fill="black")
+    im.save(path, lossless=True)
+    return str(path)
+
+
+def test_detail_images_zoom_only_where_needed(tmp_path):
+    from structlab.reading import detail as D
+    a = _sheet(tmp_path / "a.webp", blank_right=True)
+    tiles = D.content_tiles(a)
+    names = {n for _, n in tiles}
+    assert "左上" in names and "右上" not in names               # 白紙の部分は拡大しない
+    b = _sheet(tmp_path / "b.webp", blank_right=True, mark=(60, 60, 110, 80))
+    box = D.change_box(a, b)
+    assert box and box[0] <= 60 and box[2] >= 110 and box[2] - box[0] < 200   # 変わったセルの周りだけ
+    z = D.change_zoom(a, b)
     from PIL import Image
+    assert Image.open(z).size[0] >= 3 * (box[2] - box[0]) - 2              # 元の画素から 3 倍
+    assert D.change_box(a, a) is None                                       # 変化なしなら作らない
+
+
+def test_detail_requests_split_zoom_pass_and_merge(tmp_path):
     from structlab.models import fmt_time
     from structlab.reading import ai_read
-    f = tmp_path / "f.jpg"
-    Image.new("RGB", (100, 60), "white").save(f)
-    sc = {"index": 3, "start": 0, "end": 60, "frame_time": 1, "frame": str(f), "ocr": "",
-          "tiles": [{"frame": str(f), "label": n} for n in ("左上", "右上", "左下", "右下")],
-          "events_with_frames": [{"time": float(i), "frame": str(f)} for i in range(30)],
+    frames = [_sheet(tmp_path / f"f{i}.webp", seed=i) for i in range(31)]
+    sc = {"index": 3, "start": 0, "end": 60, "frame_time": 1, "frame": frames[0], "ocr": "",
+          "events_with_frames": [{"time": float(i + 2), "frame": frames[i + 1]} for i in range(30)],
           "speech": [{"start": 2.0, "end": 4.0, "text": "ここは必ず絶対参照にしてください"}]}
     reqs = ai_read.video_detail_requests("excel", sc, fmt_time)
-    assert len(reqs) == 3 and len(reqs[0].images) == 1 + 4 + 12 and len(reqs[1].images) == 1 + 1 + 12
-    assert "絶対参照" in reqs[0].text and reqs[0].schema is ai_read.DETAIL_SCHEMA
+    assert len(reqs) == 3 and "絶対参照" in reqs[0].text and reqs[0].schema is ai_read.DETAIL_SCHEMA
+    assert all(im.lossless for r in reqs for im in r.images)
+    assert reqs[0].images[0].label.startswith("[F0]") and any(im.label.startswith("[F12]") for im in reqs[0].images)
+    assert any(im.label.startswith("[F13]") for im in reqs[1].images)      # 画面番号は場面の中で通し番号
     base = {k: [] for k in ai_read.DETAIL_SCHEMA["required"]}
     base.update({"title": "t", "notes": ""})
-    parts = [{**base, "operations": [{"time": "0:01", "action": "a", "target": "B3", "value": "=A3*2"}]},
-             {**base, "speech_points": [{"time": "0:02", "text": "必ず絶対参照", "source": "speech"}]}, None]
-    m = ai_read.merge_detail(parts)
-    assert len(m["operations"]) == 1 and len(m["speech_points"]) == 1 and "未完了" in m["notes"]
-    assert m["unreadable"]  # 欠けた部分は読めなかったこととして残る
+    p1 = [{**base, "operations": [{"time": "0:01", "action": "a", "target": "B3", "value": "=A3*2"}],
+           "zoom_requests": [{"frame": "F5", "x": 0.0, "y": 0.1, "w": 0.3, "h": 0.2, "target": "cell", "what": "B3 の値"}]},
+          {**base, "speech_points": [{"time": "0:02", "text": "必ず絶対参照", "source": "speech"}]}, {**base}]
+    zr = ai_read.zoom_requests("excel", sc, p1, fmt_time)
+    assert len(zr) == 1 and len(zr[0].images) == 1 and "B3" in zr[0].text
+    from PIL import Image
+    assert Image.open(zr[0].images[0].path).size[0] >= 4 * int(0.3 * 400)   # 元の画素から 4 倍
+    m = ai_read.merge_detail(p1, [{"readings": [{"image": 1, "time": "F5", "target": "cell", "text": "3.50",
+                                                  "readable": True, "correction": ""},
+                                                 {"image": 2, "time": "F6", "target": "cell", "text": "",
+                                                  "readable": False, "correction": ""}]}])
+    assert len(m["operations"]) == 1 and len(m["zoom_readings"]) == 2
+    assert any("拡大しても読めない" in u["reason"] for u in m["unreadable"])   # 読めないものは未確認のまま
+    part = ai_read.merge_detail([p1[0], None])
+    assert "未完了" in part["notes"] and part["unreadable"]
+
+
+def test_lossless_upload_keeps_pixels(tmp_path):
+    import base64
+    import io
+    from PIL import Image
+    from structlab.ai.anthropic_provider import encode_image
+    f = _sheet(tmp_path / "s.webp")
+    media, data = encode_image(f, 2576, lossless=True)
+    got = Image.open(io.BytesIO(base64.b64decode(data))).convert("RGB")
+    assert media == "image/webp" and list(got.getdata()) == list(Image.open(f).convert("RGB").getdata())
 
 
 @needs_ffmpeg
-def test_detail_mode_saves_tiles_and_all_changes(tmp_path):
+def test_detail_mode_saves_native_lossless_frames_and_brief_displays(tmp_path):
+    """Excel・レポートの作り方: 元の解像度の可逆画像で保存し、0.4 秒だけ出た画面も拾う。"""
+    from PIL import Image, ImageDraw
     from structlab import media
     from structlab.reading.video_read import read_video
+    work = tmp_path / "w"
+    work.mkdir()
+    W, H = 360, 780
+    lst = work / "list.txt"
+    with open(lst, "w") as f:
+        for k, (label, dur) in enumerate([("SHEET A", 4.0), ("DIALOG 12.5", 0.4), ("SHEET A", 4.0)]):
+            im = Image.new("RGB", (W, H), (20, 20, 20))
+            d = ImageDraw.Draw(im)
+            d.rectangle((0, 0, W, 60), fill="white")
+            d.rectangle((30, 290, 330, 515), fill="lightyellow")
+            d.text((60, 380), label, fill="black", font=dummy_data._font(30))
+            fp = work / f"f{k}.png"
+            im.save(fp)
+            f.write(f"file '{fp}'\nduration {dur}\n")
+        f.write(f"file '{fp}'\n")
     v = tmp_path / "rec.mp4"
-    make_screen_recording(v, tmp_path / "w", [["SLIDE A", "Load 23.0 kN"], ["SLIDE B", "Strain 2000"]], secs_each=6)
+    subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
+                    "-vf", "fps=25,format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast", str(v)], check=True)
     rec = read_video(v, tmp_path / "out", ocr=media.OCR("none", "eng"), transcriber=None, interval=0.5, detail=True,
                      log=lambda m: None)
-    uniq = [sc for sc in rec["scenes"] if sc.get("same_as") is None]
-    assert uniq and all(len(sc.get("tiles", [])) == 4 for sc in uniq)
-    from PIL import Image
-    w = Image.open(uniq[0]["frame"]).size[0]
-    assert w >= 2 * rec["region"]["w"] - 2  # 資料の部分を 2 倍で保存
+    frames = [rec["scenes"][0]["frame"]] + [e["frame"] for sc in rec["scenes"] for e in sc.get("events_with_frames", [])]
+    assert all(f.endswith(".webp") for f in frames)
+    assert Image.open(frames[0]).size[0] <= rec["region"]["w"] + 2       # 拡大せず元の解像度で保存
+    times = [e["time"] for sc in rec["scenes"] for e in sc.get("events_with_frames", [])] + \
+        [sc["frame_time"] for sc in rec["scenes"]]
+    assert any(3.9 <= t <= 4.5 for t in times)                             # 0.4 秒だけの表示を拾った
+    assert rec["segments"][0]["dense_scan"]["interval"] == 0.2
 
 
 def test_semantic_bridge_reuses_reading_results(tmp_path):
@@ -609,3 +678,15 @@ def test_semantic_bridge_batches_ai_calls_without_deadlock(tmp_path):
     res = run_semantic(cfg, tmp_path / "sem", recs, prov, batch=True, log=lambda m: None)
     assert res["usage"]["calls"] > 0 and res["usage"]["failed"] == 0
     assert max(prov.batches) >= 2   # 2つの資料の依頼が同じ Batch にまとまった
+
+
+def test_detail_estimate_does_not_write_images(tmp_path):
+    from structlab.reading import ai_read
+    frames = [_sheet(tmp_path / f"f{i}.webp", seed=i) for i in range(3)]
+    rec = {"kind": "video", "role": {"kind": "lecture_detail"}, "speech": [],
+           "scenes": [{"index": 0, "start": 0, "end": 10, "frame_time": 1, "frame": frames[0], "ocr": "", "same_as": None,
+                       "mode": "operations", "events_with_frames": [{"time": 2.0, "frame": frames[1]},
+                                                                     {"time": 3.0, "frame": frames[2]}]}]}
+    plan = ai_read.plan_requests(rec)
+    assert plan[0][0] == "video_detail2" and plan[0][1] > 3 * (800 * 480 // 750)
+    assert not (tmp_path / "derived").exists()          # 見積もりでは拡大画像を作らない

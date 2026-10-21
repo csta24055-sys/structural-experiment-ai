@@ -266,21 +266,19 @@ def typical_time(sc: dict, times: list[float], frames: list[np.ndarray]) -> floa
 
 #: 画面の保存サイズ（資料の部分の長辺）。AI に送れる最大は 2576
 #: native: 切り出した資料は元の解像度（長辺が FRAME_MIN_EDGE 未満なら拡大）、画面全体（カメラ映像）は長辺 1568
-#: detail: Excel・レポートの作り方の動画。資料の部分を元の 2 倍（最大 2576）にして小さな文字・セルを読みやすくする
+#: detail: Excel・レポートの作り方の動画。資料の部分を元の解像度のまま可逆（WebP lossless）で保存し、
+#:         AI に送るときに全体を 2 倍、部分拡大を 3 倍にする（ai_read.detail_images）
 FRAME_MIN_EDGE = 1000
 FRAME_FULL_EDGE = 1568
 FRAME_MAX_EDGE = 2576
-DETAIL_SCALE = 2.0
-TILE_SCALE = 3.0      # 部分拡大（2×2 に分けた各部分を元の 3 倍）
-TILE_OVERLAP = 0.1    # 部分拡大の重なり（境目の文字が切れないように）
 
 
 def frame_size(region: media.Region, mode: str = "native", min_edge: int = FRAME_MIN_EDGE) -> dict:
     """extract_frame に渡す幅（資料の部分の長辺が規則どおりになる幅）。"""
     w, h = region.w, region.h
     long_edge = max(w, h)
-    if mode == "detail":
-        edge = min(FRAME_MAX_EDGE, int(long_edge * DETAIL_SCALE))
+    if mode == "detail":  # 元の解像度のまま可逆で保存する（拡大は AI に送るときに元の画素から作る）
+        edge = long_edge
     elif region.is_full:
         edge = min(FRAME_FULL_EDGE, long_edge)
     else:
@@ -290,32 +288,48 @@ def frame_size(region: media.Region, mode: str = "native", min_edge: int = FRAME
     return {"max_width": max(width, 2), "min_width": width if width > w else 0}
 
 
-def tile_regions(region: media.Region) -> list[media.Region]:
-    """資料の部分を 2×2 に分けた部分拡大用の範囲（少し重ねる）。"""
-    out = []
-    tw, th = int(region.w * (0.5 + TILE_OVERLAP / 2)), int(region.h * (0.5 + TILE_OVERLAP / 2))
-    tw -= tw % 2
-    th -= th % 2
-    for ky in (0, 1):
-        for kx in (0, 1):
-            x = region.x + (0 if kx == 0 else region.w - tw)
-            y = region.y + (0 if ky == 0 else region.h - th)
-            r = media.Region(x - x % 2, y - y % 2, tw, th, region.full_w, region.full_h, region.rotate)
-            out.append(r)
+DENSE_INTERVAL = 0.2
+DENSE_BRIEF = 3        # 連続して変化している間がこの回数以下なら「短時間の表示」とみなし、すべて残す
+
+
+def dense_changes(path: Path, start: float, end: float, w: int, h: int, crop: str | None,
+                  interval: float = DENSE_INTERVAL) -> list[dict]:
+    """interval 秒ごとに画面を見て、意味のある変化（マウスの移動などの小さな変化を除く）のあった時刻を返す。
+    短時間の表示（変化が DENSE_BRIEF 回以内で終わる）は全部、長く続く変化（スクロール・入力中）は始め・終わりと1秒ごと。"""
+    out: list[dict] = []
+    prev = None
+    run: list[tuple[float, np.ndarray]] = []
+
+    def flush():
+        if not run:
+            return
+        if len(run) <= DENSE_BRIEF:
+            keep = run
+        else:
+            keep = [run[0]] + [x for k, x in enumerate(run[1:-1], 1) if k % max(1, int(1 / interval)) == 0] + [run[-1]]
+        for t, f in keep:
+            out.append({"time": round(t, 2), "change": None, "dense": True, "hash": dhash(f)})
+        run.clear()
+    for t, f in media.iter_gray_frames(path, start, max(0.0, end - start), interval, w, h, crop=crop):
+        if prev is not None:
+            frac = float(np.mean(np.abs(f.astype(np.int16) - prev.astype(np.int16)) >= 24))
+            if frac >= SMALL_CHANGE:
+                run.append((t, f))
+            else:
+                flush()
+        prev = f
+    flush()
     return out
 
 
-def save_tiles(path: Path, t: float, base: Path, region: media.Region) -> list[str]:
-    """代表画面の部分拡大（左上・右上・左下・右下）を保存する。"""
-    names = ["左上", "右上", "左下", "右下"]
-    out = []
-    for k, r in enumerate(tile_regions(region)):
-        width = min(FRAME_MAX_EDGE if r.w >= r.h else int(FRAME_MAX_EDGE * r.w / r.h), int(r.w * TILE_SCALE))
-        width -= width % 2
-        jpg = media.extract_frame(path, t, base.with_name(f"{base.stem}_tile{k}{base.suffix}"), region=r,
-                                  max_width=width, min_width=width if width > r.w else 0)
-        out.append({"frame": str(jpg), "label": names[k]})
-    return out
+def merge_dense(events: list[dict], dense: list[dict], max_bits: int = 2) -> list[dict]:
+    """0.5 秒ごとの変化と 0.2 秒ごとの走査の変化をまとめる（同じ時刻・同じ画面は1つに）。"""
+    out = list(events)
+    for d in dense:
+        if any(abs(d["time"] - e["time"]) <= 0.3 for e in out):
+            continue
+        out.append({k: v for k, v in d.items() if k != "hash"})
+    return sorted(out, key=lambda e: e["time"])
 
 
 def distinct_events(events: list[dict], times: list[float], frames: list[np.ndarray], max_bits: int = 2) -> list[dict]:
@@ -343,6 +357,9 @@ def save_frame(path: Path, t: float, out: Path, region: media.Region, info: medi
         W, H = (info.height, info.width) if region.rotate else (info.width, info.height)
         region = media.Region(0, 0, W, H, W, H, region.rotate)
         out = out.with_name(out.stem + "_full" + out.suffix)
+    if mode == "detail":  # 元の映像から取り出した画素をそのまま（可逆）保存する
+        png = media.extract_frame(path, t, out.with_suffix(".png"), region=region, **frame_size(region, mode))
+        return media.save_lossless(png)
     return media.extract_frame(path, t, out, region=region, **frame_size(region, mode))
 
 
@@ -484,6 +501,13 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
         if mode in ("slides", "operations"):
             scenes = merge_notifications(scenes, times, frames)
         seg["mode"] = mode
+        dense: list[dict] = []
+        if detail:  # 短時間だけ表示された操作・設定を落とさないよう、0.2 秒ごとに画面を見直す
+            sh = frames[0].shape if frames else (2, 2)
+            dense = dense_changes(path, seg["start"], s_end, sh[1], sh[0], seg["_region"].vf())
+            seg["dense_scan"] = {"interval": DENSE_INTERVAL, "distinct": len(dense)}
+            rec["segments"][si]["dense_scan"] = seg["dense_scan"]
+            log(f"  0.2 秒ごとの走査: 画面の変化 {len(dense)} か所")
         region = seg["_region"]
         for sc in scenes:
             i = len(scenes_all)
@@ -502,15 +526,14 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
             else:
                 jpg = save_frame(path, t, out_dir / f"scene_{i:04d}.jpg", region, sinfo_of(seg, info),
                                  "detail" if detail else "native")
-                if detail and not jpg.stem.endswith("_full"):
-                    sc["tiles"] = save_tiles(path, t, jpg, region)
                 sc["frame"] = str(jpg)
                 sc["ocr"] = ocr_image(ocr, jpg) if mode != "experiment" else ""
             if mode == "experiment":  # 区間の始めと終わりの画面も保存（変化の確認用）
                 extra = [round(sc["start"] + 0.5, 2), round(max(sc["start"], sc["end"] - 0.5), 2)]
                 evs = [{"time": x, "change": None} for x in extra if abs(x - t) > 1.0]
-            elif detail:  # Excel・レポートの作り方: 変化した画面をすべて（同じ画面の繰り返しだけ除く）
-                evs = distinct_events(sc["events"], times, frames)
+            elif detail:  # Excel・レポートの作り方: 変化した画面をすべて（0.2 秒ごとの走査で見つけた短時間の表示を含む）
+                evs = merge_dense(distinct_events(sc["events"], times, frames),
+                                  [d for d in dense if sc["start"] <= d["time"] < sc["end"] and abs(d["time"] - t) > 0.3])
             else:
                 evs = sorted(sc["events"], key=lambda e: -e["change"])[:max_events_per_scene]
             for e in sorted(evs, key=lambda e: e["time"]):

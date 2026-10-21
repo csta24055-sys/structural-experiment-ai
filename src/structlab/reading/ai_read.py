@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..ai.base import AIImage, AIRequest
@@ -298,6 +299,11 @@ EST_GROUP_OUTPUT_PER_WINDOW = 900
 #: Excel・レポートの作り方の細部の読み取り: 書き起こし＋音声の要点＋変化した画面ごとの操作
 EST_DETAIL_OUTPUT_BASE = 5000
 EST_DETAIL_OUTPUT_PER_FRAME = 350
+#: 第2段（AI が求めた範囲の拡大）: 1部分あたりの拡大の数・1枚の画像トークン・出力（いずれも推測）
+EST_ZOOMS_PER_CHUNK = 3.0
+EST_ZOOM_TOKENS = 2500
+EST_ZOOM_OUTPUT_BASE = 1500
+EST_ZOOM_OUTPUT_PER_IMAGE = 300
 
 
 def image_tokens(path: str | Path, max_edge: int = 2576) -> int:
@@ -340,11 +346,17 @@ def plan_requests(rec: dict) -> list[tuple[str, int, int, str]]:
         if detail:
             chunks = detail_chunks(sc)
             speech = min(8000, sum(len(x["text"]) + 12 for x in sc.get("speech", [])))
+            from . import detail as D
             for k, evs in enumerate(chunks):
-                imgs = [sc["frame"]] + ([t["frame"] for t in sc.get("tiles", [])] if k == 0 else
-                                        [chunks[k - 1][-1]["frame"]]) + [e["frame"] for e in evs]
-                out.append((f"video_detail{len(evs)}", sum(image_tokens(f) for f in imgs),
+                prev = None if k == 0 else chunks[k - 1][-1]["frame"]
+                sizes = D.planned_sizes(sc["frame"] if k == 0 else prev, [e["frame"] for e in evs], prev)
+                out.append((f"video_detail{len(evs)}", sum(int(w * h / 750) + 1 for w, h in sizes),
                             600 + speech + min(len(sc.get("ocr") or ""), 3000) // 2, f"scene{sc['index']}_{k}", 0))
+            # 第2段（AI が求めた範囲の拡大）の見込み: 部分ごとに EST_ZOOMS_PER_CHUNK か所（推測）、1 か所 EST_ZOOM_TOKENS
+            nz = round(len(chunks) * EST_ZOOMS_PER_CHUNK)
+            for i in range(0, nz, ZOOMS_PER_CALL):
+                n = min(ZOOMS_PER_CALL, nz - i)
+                out.append((f"video_zoom{n}", n * EST_ZOOM_TOKENS, 3000, f"scene{sc['index']}_z{i}", 0))
             continue
         imgs = [sc["frame"]] + [e["frame"] for e in sc.get("events_with_frames", [])]
         kind = "video_ops" if sc.get("events_with_frames") else "video_scene"
@@ -372,6 +384,9 @@ def estimate_plan(records: dict[str, dict], *, system_tokens: int = 1800, price_
                 n = int(kind[len("video_detail"):])
                 out = EST_DETAIL_OUTPUT_BASE + EST_DETAIL_OUTPUT_PER_FRAME * n
                 kind = "video_detail"
+            elif kind.startswith("video_zoom"):
+                out = EST_ZOOM_OUTPUT_BASE + EST_ZOOM_OUTPUT_PER_IMAGE * int(kind[len("video_zoom"):])
+                kind = "video_zoom"
             else:
                 out = EST_OUTPUT[kind]
             # キャッシュする先頭部分（指示文・基準画像）: 書き込み 1.25 倍・読み出し 0.05 倍。cache_hit は読み出しになる割合の仮定
@@ -394,22 +409,35 @@ def estimate_plan(records: dict[str, dict], *, system_tokens: int = 1800, price_
 
 # ---------------- Excel・レポートの作り方の動画（細部まで読む） ----------------
 DETAIL_EVENTS_PER_CALL = 12
+ZOOMS_PER_CALL = 10
 
 DETAIL_SYSTEM = SYSTEM + """
 
 この動画は Excel の作り方・レポートの作り方の説明で、後で同じ Excel・レポートを作るために使います。細部まで正確に読んでください:
-- 「部分拡大」は代表画面の一部（左上・右上・左下・右下）を拡大したもの。小さな文字・セル・数式・目盛りは部分拡大で読む
+- 画像は元の映像から取り出した最高画質のもの。「全体」は 2 倍、「部分拡大」「操作した部分の拡大」は 3 倍に拡大してある。
+  小さな文字・セル・数式・グラフの設定・メニュー・書式は拡大画像で読む
 - 画面の変化は、短時間だけ表示された操作・ダイアログ・設定値・数式バーの内容も含めて、すべて operations に時刻付きで書く
   （セル番地・入力した式・関数・書式・グラフの種類・軸・系列・近似曲線・ファイル名・シート名・メニューの項目など）
 - 音声の文字起こし（誤りを含む）を参考に、画面と対応づけて、説明・手順・指示・注意・理由を speech_points に時刻付きで書く。
   音声の内容は言い換えず要点を正確に（数値・式・指示の強さを変えない）。発言者は特定しない（「音声」として書く）。
   音声だけで画面に無いことは source=speech、画面と両方にあることは both
 - 画面に一瞬だけ表示された設定（ダイアログの値、書式の指定など）は settings_shown に時刻と値を書く
+- 拡大画像でも小さくて読めない・確かでない文字があれば推測せず、zoom_requests にその範囲を書く
+  （どの画面か＝画像に付いた画面番号 F0・F1…、範囲＝その画面の「全体」画像に対する割合 x,y,w,h（0〜1）、何を読みたいか）。
+  ここで書いた範囲は元の画素から 4 倍に拡大して改めて渡す。本当に必要なものだけ（1回に最大 8 か所）
 - 読めない・聞き取れない箇所は推測せず unreadable に書く"""
+
+_ZOOM_REQ = {"type": "array", "items": {
+    "type": "object", "additionalProperties": False, "required": ["frame", "x", "y", "w", "h", "target", "what"],
+    "properties": {"frame": _STR, "x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"},
+                   "h": {"type": "number"},
+                   "target": {"type": "string", "enum": ["cell", "formula", "chart_setting", "menu", "format", "dialog",
+                                                         "text", "graph", "other"]},
+                   "what": _STR}}}
 
 DETAIL_SCHEMA = {
     **SCHEMA,
-    "required": SCHEMA["required"] + ["speech_points", "settings_shown"],
+    "required": SCHEMA["required"] + ["speech_points", "settings_shown", "zoom_requests"],
     "properties": {
         **SCHEMA["properties"],
         "speech_points": {"type": "array", "items": {
@@ -419,7 +447,23 @@ DETAIL_SCHEMA = {
         "settings_shown": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["time", "where", "value"],
             "properties": {"time": _STR, "where": _STR, "value": _STR}}},
+        "zoom_requests": _ZOOM_REQ,
     },
+}
+
+ZOOM_SYSTEM = SYSTEM + """
+
+1回目の読み取りで「小さくて読めない・確かでない」とされた範囲を、元の映像の画素から 4 倍に拡大した画像を渡します。
+各画像の中の文字・数値・式・設定を、見えるとおりに正確に書き起こしてください。1回目の読み取り（参考）と違えば correction に書く。
+拡大しても読めない部分は推測せず readable=false とする。"""
+
+ZOOM_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["readings"],
+    "properties": {"readings": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False,
+        "required": ["image", "time", "target", "text", "readable", "correction"],
+        "properties": {"image": {"type": "integer"}, "time": _STR, "target": _STR, "text": _STR,
+                       "readable": {"type": "boolean"}, "correction": _STR}}}},
 }
 
 
@@ -428,20 +472,39 @@ def detail_chunks(scene: dict, size: int = DETAIL_EVENTS_PER_CALL) -> list[list[
     return [evs[i:i + size] for i in range(0, len(evs), size)] or [[]]
 
 
+def detail_images(scene: dict, k: int, chunks: list[list[dict]], fmt_time) -> list[AIImage]:
+    """k 番目の部分で送る画像（元の解像度の可逆画像から作る）。"""
+    from . import detail as D
+    imgs = []
+    rep = scene["frame"]
+    if k == 0:
+        imgs.append(AIImage(D.overview(rep), f"[F0] {fmt_time(scene['frame_time'])} の画面（場面の代表・全体）", lossless=True))
+        imgs += [AIImage(p, f"[F0] {fmt_time(scene['frame_time'])} の画面の部分拡大（{name}）", lossless=True)
+                 for p, name in D.content_tiles(rep)]
+        prev = rep
+    else:
+        last = chunks[k - 1][-1]
+        imgs.append(AIImage(D.overview(last["frame"]), f"{fmt_time(last['time'])} の画面（前の部分の最後・比較用）",
+                            lossless=True))
+        prev = last["frame"]
+    base = sum(len(c) for c in chunks[:k])
+    for n, e in enumerate(chunks[k], base + 1):
+        imgs.append(AIImage(D.overview(e["frame"]), f"[F{n}] {fmt_time(e['time'])} の画面（変化・全体）", lossless=True))
+        z = D.change_zoom(prev, e["frame"])
+        if z:
+            imgs.append(AIImage(z, f"[F{n}] {fmt_time(e['time'])} の画面の、直前から変わった部分の拡大", lossless=True))
+        prev = e["frame"]
+    return imgs
+
+
 def video_detail_requests(file_label: str, scene: dict, fmt_time) -> list[AIRequest]:
-    """場面の代表画面・部分拡大・変化したすべての画面・音声を、画面の数が多ければ複数回に分けて読む。"""
+    """場面の代表画面・部分拡大・変化したすべての画面（変わった部分の拡大つき）・音声を、多ければ複数回に分けて読む。"""
     chunks = detail_chunks(scene)
     speech = "\n".join(f"[{fmt_time(x['start'])}] {x['text']}" for x in scene.get("speech", []))[:8000]
     ocr = (scene.get("ocr") or "")[:3000]
     out = []
     for k, evs in enumerate(chunks):
-        imgs = [AIImage(Path(scene["frame"]), f"{fmt_time(scene['frame_time'])} の画面（場面の代表）")]
-        if k == 0:
-            imgs += [AIImage(Path(t["frame"]), f"代表画面の部分拡大（{t['label']}）") for t in scene.get("tiles", [])]
-        else:
-            prev = chunks[k - 1][-1]
-            imgs.append(AIImage(Path(prev["frame"]), f"{fmt_time(prev['time'])} の画面（前の部分の最後・比較用）"))
-        imgs += [AIImage(Path(e["frame"]), f"{fmt_time(e['time'])} の画面（変化）") for e in evs]
+        imgs = detail_images(scene, k, chunks, fmt_time)
         part = f"（{k + 1}/{len(chunks)} 部分目: {fmt_time(evs[0]['time'])}–{fmt_time(evs[-1]['time'])} の変化）" \
             if len(chunks) > 1 and evs else ""
         text = (f"# 資料: {file_label} の動画 {fmt_time(scene['start'])}–{fmt_time(scene['end'])} の場面{part}\n"
@@ -455,8 +518,51 @@ def video_detail_requests(file_label: str, scene: dict, fmt_time) -> list[AIRequ
     return out
 
 
-def merge_detail(parts: list[dict | None]) -> dict | None:
-    """分けて読んだ結果を1つの場面の結果にまとめる（どれかが欠けていれば notes に書く）。"""
+def _frame_at(scene: dict, label: str) -> str | None:
+    """AI が書いた画面番号（F0 = 代表、F1… = 変化した画面の順）に当たる元の画面。"""
+    import re as _re
+    m = _re.search(r"F(\d+)", str(label))
+    if not m:
+        return None
+    n = int(m.group(1))
+    evs = scene.get("events_with_frames", [])
+    return scene["frame"] if n == 0 else (evs[n - 1]["frame"] if n <= len(evs) else None)
+
+
+def zoom_requests(file_label: str, scene: dict, pass1: list[dict | None], fmt_time) -> list[AIRequest]:
+    """1回目で AI が求めた範囲を元の画素から 4 倍に拡大して読む（第2段）。求めが無ければ送らない。"""
+    from . import detail as D
+    asks = []
+    for part in pass1:
+        for z in (part or {}).get("zoom_requests", []) or []:
+            src = _frame_at(scene, z.get("frame", ""))
+            if src:
+                asks.append((z, src))
+    out = []
+    for i in range(0, len(asks), ZOOMS_PER_CALL):
+        imgs, lines = [], []
+        for n, (z, src) in enumerate(asks[i:i + ZOOMS_PER_CALL], 1):
+            p = D.ai_zoom(src, z, i + n)
+            if not p:
+                continue
+            imgs.append(AIImage(p, f"拡大 {n}: 画面 {z['frame']} の {z['target']}（{z['what']}）", lossless=True))
+            lines.append(f"- 拡大 {n}: 画面 {z['frame']} {z['target']}: {z['what']}")
+        if not imgs:
+            continue
+        ref = json.dumps([{k: (p or {}).get(k) for k in ("operations", "settings_shown", "formulas", "tables")}
+                          for p in pass1], ensure_ascii=False)[:12000]
+        text = (f"# 資料: {file_label} の動画 {fmt_time(scene['start'])}–{fmt_time(scene['end'])} の場面の拡大\n"
+                + "\n".join(lines) + f"\n\n## 参考: 1回目の読み取り（該当しそうな部分）\n{ref}\n\n"
+                "各拡大画像を、指示どおりに正確に書き起こしてください（image に拡大の番号）。")
+        out.append(AIRequest(task="read_video_zoom", source_label=f"{file_label} {fmt_time(scene['start'])} zoom{i}",
+                             text=text, images=imgs, t_start=scene["start"], t_end=scene["end"],
+                             system=ZOOM_SYSTEM, schema=ZOOM_SCHEMA, max_tokens=16000))
+    return out
+
+
+def merge_detail(parts: list[dict | None], zooms: list[dict | None] | None = None) -> dict | None:
+    """分けて読んだ結果を1つの場面の結果にまとめる（どれかが欠けていれば notes と unreadable に書く）。
+    拡大して読んだ結果は zoom_readings に追加し、1回目の結果は消さない（食い違いは correction に残る）。"""
     got = [x for x in parts if x]
     if not got:
         return None
@@ -469,4 +575,12 @@ def merge_detail(parts: list[dict | None]) -> dict | None:
     if len(got) < len(parts):
         out["notes"] += f" / {len(parts) - len(got)} 部分の読み取りが未完了"
         out.setdefault("unreadable", []).append({"where": "場面の一部", "reason": "AI の読み取りが未完了"})
+    if zooms is not None:
+        out["zoom_readings"] = [r for z in zooms if z for r in z.get("readings", [])]
+        if any(z is None for z in zooms):
+            out.setdefault("unreadable", []).append({"where": "拡大の読み取り", "reason": "AI の読み取りが未完了"})
+        for r in out["zoom_readings"]:
+            if not r.get("readable"):
+                out.setdefault("unreadable", []).append({"where": f"{r.get('time')} {r.get('target')}",
+                                                         "reason": "4 倍に拡大しても読めない"})
     return out

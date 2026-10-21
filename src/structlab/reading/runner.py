@@ -307,7 +307,17 @@ class Reader:
                 reqs = ai_read.video_detail_requests(label, sc, fmt_time)
                 parts = [self._ai_cached(rec, f"scene_{sc['index']:04d}_d{k}", (lambda r=r: r))
                          for k, r in enumerate(reqs)]
-                sc["ai"] = ai_read.merge_detail(parts) if all(x is not None for x in parts) or not self.batch else None
+                if self.batch and any(x is None for x in parts):
+                    sc["ai"] = None
+                    return
+                # 第2段: 1回目で AI が「小さくて読めない」と示した範囲を、元の画素から拡大して読み直す
+                zreqs = ai_read.zoom_requests(label, sc, parts, fmt_time)
+                zooms = [self._ai_cached(rec, f"scene_{sc['index']:04d}_z{k}", (lambda r=r: r))
+                         for k, r in enumerate(zreqs)]
+                if self.batch and any(z is None for z in zooms):
+                    sc["ai"] = None
+                    return
+                sc["ai"] = ai_read.merge_detail(parts, zooms)
                 sc["ai_model"] = "main"
             return run
         if role.get("kind") == "lecture_detail":

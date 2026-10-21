@@ -31,6 +31,7 @@ sources:
   M18: {ts: "2026-10-21T09:31:02Z", title: 3,800円の見積もりの最適化}
   M19: {ts: "2026-10-21T10:59:53Z", title: 品質を一切落とさない費用削減}
   M20: {ts: "2026-10-21T11:48:26Z", title: 2,350円構成＋Excel・レポート動画の精度向上＋要求事項の管理}
+  M21: {ts: "2026-10-21T12:12:07Z", title: エクセル・レポートの作り方の動画をさらに高精細に}
   CLAUDE: {ts: "repository", title: CLAUDE.md（作業指示）}
 
 requirements:
@@ -69,6 +70,18 @@ requirements:
    text: "元動画に音声が存在しない部分の文字起こしを捏造しない。映像から確認できる内容のみ解析する（読み取れない情報を推測で補完しない）"}
 - {id: P017, src: [M20], stage: [reading], kind: 必須, verify: auto:lecture_detail_applied,
    text: "「エクセルの作り方」「レポートの作り方」は、最終成果物の作成時に必要な情報が不足しないよう、解像度・フレーム抽出密度・部分拡大などを必要な限り高める。先生の音声による説明や短時間だけ表示される操作・設定も対象"}
+- {id: P110, src: [M21], stage: [reading], kind: 必須, verify: auto:lecture_lossless_frames,
+   text: "「エクセルの作り方」「レポートの作り方」の2種類だけは、元映像から取得できる最高品質のフレームを使う（費用が多少増えても高精細を優先）"}
+- {id: P111, src: [M21], stage: [reading], kind: 必須, verify: auto:lecture_zoom,
+   text: "必要に応じて、セル・数式・グラフ設定・メニュー・書式・操作部分などを個別に拡大して解析する"}
+- {id: P112, src: [M21], stage: [reading], kind: 必須, verify: auto:lecture_dense_scan,
+   text: "短時間だけ表示される設定変更や操作を見落とさないよう、必要な箇所では抽出間隔を細かくする"}
+- {id: P113, src: [M21], stage: [reading, excel, report], kind: 必須, verify: auto:requirements_ledger,
+   text: "最終的な Excel・レポート作成時に必要な情報が不足しないことを最優先し、以前の本番解析指示のすべての条件・禁止事項・必須事項も漏れなく確認する"}
+- {id: P114, src: [M21], stage: [cost], kind: 禁止, verify: manual,
+   text: "意味のない画像拡大や重複解析で費用を増やさない（読み取り精度と情報の網羅性を最大限高める方向で最適化する）"}
+- {id: P115, src: [M21], stage: [reading, cost], kind: 必須, verify: auto:config_2350,
+   text: "ほかの動画の解析設定は変更しない。追加費用と新しい総額を見積もる"}
 - {id: P018, src: [M15, M14], stage: [reading], kind: 必須, verify: auto:per_material_outputs,
    text: "資料ごとに、読み取った内容、重要な数値・式・指示、画像・映像の時刻、解析の確実性、不明点を記録する"}
 

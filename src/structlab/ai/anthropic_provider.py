@@ -11,11 +11,22 @@ from .base import AIError, AIProvider, AIRequest, AIResponse
 from .prompts import OUTPUT_SCHEMA, SYSTEM_PROMPT, build_user_text
 
 
-def encode_image(path, max_edge: int) -> tuple[str, str]:
+MAX_IMAGE_BYTES = 3_700_000  # API の上限（1枚 5MB、base64 で 4/3 倍になる）に収める
+
+
+def encode_image(path, max_edge: int, lossless: bool = False) -> tuple[str, str]:
     with Image.open(path) as im:
         im = im.convert("RGB")
-        im.thumbnail((max_edge, max_edge))
+        if max(im.size) > max_edge:
+            im.thumbnail((max_edge, max_edge), Image.LANCZOS)
         buf = io.BytesIO()
+        if lossless:
+            im.save(buf, format="WEBP", lossless=True, method=4)
+            if buf.tell() <= MAX_IMAGE_BYTES:
+                return "image/webp", base64.standard_b64encode(buf.getvalue()).decode("ascii")
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=97, subsampling=0)  # 上限を超える場合だけ、ほぼ劣化のない JPEG
+            return "image/jpeg", base64.standard_b64encode(buf.getvalue()).decode("ascii")
         im.save(buf, format="JPEG", quality=85)
     return "image/jpeg", base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
@@ -44,7 +55,7 @@ class AnthropicProvider(AIProvider):
     def _content(self, req: AIRequest) -> list[dict]:
         content: list[dict] = []
         for img in req.images:
-            media, data = encode_image(img.path, self.max_image_edge)
+            media, data = encode_image(img.path, self.max_image_edge, getattr(img, "lossless", False))
             content.append({"type": "text", "text": f"[画像: {img.label}]"})
             block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": data}}
             if getattr(img, "cache", False):

@@ -97,7 +97,10 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: work/reading
+          # 拡大画像（derived）は元の解像度の画像からいつでも作り直せるので保存しない
+          path: |
+            work/reading
+            !work/reading/**/derived
           key: reading-${{ matrix.target.key }}-${{ github.run_id }}
       - name: Artifact name
         if: always()
@@ -107,7 +110,9 @@ jobs:
         if: always()
         with:
           name: ${{ steps.n.outputs.name }}
-          path: work/reading
+          path: |
+            work/reading
+            !work/reading/**/derived
           retention-days: 30
           if-no-files-found: warn
 

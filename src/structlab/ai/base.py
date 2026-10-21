@@ -14,6 +14,8 @@ class AIImage:
     # この画像までを API のキャッシュに置く（同じ資料の依頼で毎回先頭に付く基準画像など）。
     # 送る内容は変わらず、2件目以降はキャッシュから読まれて入力が安くなる
     cache: bool = False
+    # 可逆（WebP lossless）のまま送る（Excel・レポートの作り方の画面。JPEG に変換して文字の輪郭を崩さない）
+    lossless: bool = False
 
 
 @dataclass
