@@ -3,4 +3,4 @@
 allow_external_ai: false
 # count_tokens: true は入力トークンの実測（API の count_tokens。推論しないので課金なし）
 count_tokens: true
-request: 2026-10-21 optimized preprocessing (v4: nested crop, rotation fix, native resolution, grid frames) — free pass + input token measurement
+request: 2026-10-21 v5 free pass (lossless optimizations only) + input token measurement

@@ -264,40 +264,33 @@ def typical_time(sc: dict, times: list[float], frames: list[np.ndarray]) -> floa
     return float(times[idx[int(np.argmin(cost))]])
 
 
-#: 画面の保存サイズ。切り出した資料は元の解像度のまま（拡大しても情報は増えず、AI の画像トークンが増えるだけ）。
-#: ただし長辺がこれより小さいときだけ拡大する。画面全体（カメラ映像など）は長辺 FRAME_FULL_EDGE に縮める
-FRAME_MIN_EDGE = 1000
-FRAME_FULL_EDGE = 1568
-FRAME_MAX_EDGE = 2576  # AI に送れる最大の長辺
+#: 画面の保存サイズ: 資料の部分の長辺を FRAME_EDGE にそろえる（切り出しが小さければ拡大、大きければ縮小）。
+#: 従来も「切り出し→長辺 1800 に拡大→AI に送る前に長辺 1568 に縮小」だったので、資料が AI に見える大きさは従来と同じ。
+#: 拡大は情報を増やさないが、AI は拡大した画像の方が細部を読みやすいことがあるため、従来より小さくはしない
+FRAME_EDGE = 1568
+FRAME_MIN_EDGE = FRAME_EDGE
 
 
-def frame_size(region: media.Region, min_edge: int = FRAME_MIN_EDGE) -> dict:
-    """extract_frame に渡す幅の上限・下限（元の解像度を基本に、上の規則で決める）。"""
+def frame_size(region: media.Region, edge: int = FRAME_EDGE) -> dict:
+    """extract_frame に渡す幅（資料の部分の長辺が edge になる幅）。"""
     w, h = region.w, region.h
-    if region.is_full:
-        edge = min(FRAME_FULL_EDGE, max(w, h))
-    else:
-        edge = min(FRAME_MAX_EDGE, max(min_edge, max(w, h)))
     width = edge if w >= h else int(edge * w / h)
     width -= width % 2
     return {"max_width": max(width, 2), "min_width": width if width > w else 0}
 
 
-def experiment_grid(start: float, end: float) -> list[float]:
-    """実験経過の区間で AI に送る画面の時刻: 区間の 1/4 と 3/4（区間をまたいでも間隔が等しく、最大の間隔は区間の半分）。"""
-    d = end - start
-    return [start + d / 4, start + 3 * d / 4] if d > 2.0 else [start + d / 2]
+def sinfo_of(seg: dict, info: media.ProbeInfo) -> media.ProbeInfo:
+    return replace(info, width=seg["w"], height=seg["h"])
 
 
-def clear_time(g: float, times: list[float], frames: list[np.ndarray], span: float = 2.0) -> float:
-    """格子点 g の前後 span 秒で、その間の典型的な画面に最も近い時刻（人の横切り・手ぶれなどの一時的な画面を避ける）。"""
-    idx = [k for k, t in enumerate(times) if abs(t - g) <= span]
-    if len(idx) < 2:
-        return g
-    stack = np.stack([frames[k] for k in idx]).astype(np.int16)
-    med = np.median(stack, axis=0)
-    cost = [float(np.abs(stack[j] - med).mean()) + 0.5 * abs(times[idx[j]] - g) for j in range(len(idx))]
-    return float(times[idx[int(np.argmin(cost))]])
+def save_frame(path: Path, t: float, out: Path, region: media.Region, info: media.ProbeInfo,
+               edge: int = FRAME_EDGE) -> Path:
+    """画面を保存する。切り出す範囲の外に普段と違う表示がある画面（安全確認に通らない画面）は切り出さずに全体で保存する。"""
+    if not region.is_full and not media.crop_is_safe(path, t, region):
+        W, H = (info.height, info.width) if region.rotate else (info.width, info.height)
+        region = media.Region(0, 0, W, H, W, H, region.rotate)
+        out = out.with_name(out.stem + "_full" + out.suffix)
+    return media.extract_frame(path, t, out, region=region, **frame_size(region, edge))
 
 
 # ---------------- 末尾の除外（実験経過動画） ----------------
@@ -440,11 +433,7 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
         region = seg["_region"]
         for sc in scenes:
             i = len(scenes_all)
-            if mode == "experiment":
-                sc["grid"] = [clear_time(g, times, frames) for g in experiment_grid(sc["start"], sc["end"])]
-                t = sc["grid"][0]
-            else:
-                t = typical_time(sc, times, frames)
+            t = typical_time(sc, times, frames)
             idx = min(range(len(times)), key=lambda k: abs(times[k] - t)) if times else 0
             hsh = dhash(frames[idx]) if frames else 0
             same = None if mode == "experiment" else next(
@@ -457,18 +446,18 @@ def read_video(path: Path, out_dir: Path, *, ocr: media.OCR, transcriber: media.
                 sc["frame"] = scenes_all[same]["frame"]
                 sc["ocr"] = scenes_all[same]["ocr"]
             else:
-                jpg = media.extract_frame(path, t, out_dir / f"scene_{i:04d}.jpg", region=region,
-                                          **frame_size(region, frame_width))
+                jpg = save_frame(path, t, out_dir / f"scene_{i:04d}.jpg", region, sinfo_of(seg, info), frame_width)
                 sc["frame"] = str(jpg)
                 sc["ocr"] = ocr_image(ocr, jpg) if mode != "experiment" else ""
-            if mode == "experiment":  # 区間の後半の格子点の画面（前半は代表の画面）。画面の間隔は区間をまたいでも等しい
-                evs = [{"time": round(x, 2), "change": None} for x in sc.get("grid", [])[1:]]
+            if mode == "experiment":  # 区間の始めと終わりの画面も保存（変化の確認用）
+                extra = [round(sc["start"] + 0.5, 2), round(max(sc["start"], sc["end"] - 0.5), 2)]
+                evs = [{"time": x, "change": None} for x in extra if abs(x - t) > 1.0]
             else:
                 evs = sorted(sc["events"], key=lambda e: -e["change"])[:max_events_per_scene]
             for e in sorted(evs, key=lambda e: e["time"]):
-                jpg = media.extract_frame(path, min(e["time"] + (0.5 if e["change"] else 0.0), s_end - 0.1),
-                                          out_dir / f"scene_{i:04d}_ev_{int(e['time'] * 10):07d}.jpg",
-                                          region=region, **frame_size(region, frame_width))
+                jpg = save_frame(path, min(e["time"] + (0.5 if e["change"] else 0.0), s_end - 0.1),
+                                 out_dir / f"scene_{i:04d}_ev_{int(e['time'] * 10):07d}.jpg", region,
+                                 sinfo_of(seg, info), frame_width)
                 e["frame"] = str(jpg)
             sc["events_with_frames"] = [e for e in evs if e.get("frame")]
             sc["start"], sc["end"] = round(sc["start"], 2), round(sc["end"], 2)

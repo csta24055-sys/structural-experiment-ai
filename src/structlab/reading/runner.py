@@ -25,7 +25,7 @@ from .inventory import as_dicts, build_inventory, inventory_markdown
 
 READ_KINDS = {"pdf", "video", "audio"}
 #: ローカルの読み取り方法を変えたら上げる（保存済みの読み取り結果を使い直さず、読み直すため）
-READ_VERSION = 4
+READ_VERSION = 5
 TERM = re.compile(r"[一-龥ァ-ヶー]{2,}")
 
 
@@ -280,8 +280,10 @@ class Reader:
         ref = next((sc["frame"] for sc in rec["scenes"] if sc.get("mode") == "experiment"), None)
         who = role.get("who", "")
         exp = [sc for sc in uniq if sc.get("mode") == "experiment"]
-        uniq = [sc for sc in uniq if sc.get("mode") != "experiment"]
-        groups = ai_read.experiment_groups(exp, int(role.get("group", ai_read.EXPERIMENT_GROUP)))
+        size = int(role.get("group", ai_read.EXPERIMENT_GROUP))
+        if size > 1:  # 区間をまとめる読み方（品質の確認ができるまで既定では使わない）
+            uniq = [sc for sc in uniq if sc.get("mode") != "experiment"]
+        groups = ai_read.experiment_groups(exp, size) if size > 1 else []
 
         def group_job(k, grp):
             def run():
@@ -452,10 +454,14 @@ def all_requests(rec: dict, vocab: str = "") -> list:
     uniq = [sc for sc in rec["scenes"] if sc.get("same_as") is None]
     exp = [sc for sc in uniq if sc.get("mode") == "experiment"]
     ref = exp[0]["frame"] if exp else None
-    groups = ai_read.experiment_groups(exp, int(role.get("group", ai_read.EXPERIMENT_GROUP)))
-    reqs = [ai_read.experiment_group_request(label, g, fmt_time, ref,
-                                             ai_read.window_frames(groups[k - 1][-1])[-1] if k else None,
-                                             role.get("who", "")) for k, g in enumerate(groups)]
+    size = int(role.get("group", ai_read.EXPERIMENT_GROUP))
+    if size > 1:
+        groups = ai_read.experiment_groups(exp, size)
+        reqs = [ai_read.experiment_group_request(label, g, fmt_time, ref,
+                                                 ai_read.window_frames(groups[k - 1][-1])[-1] if k else None,
+                                                 role.get("who", "")) for k, g in enumerate(groups)]
+    else:
+        reqs = [ai_read.experiment_window_request(label, sc, fmt_time, ref, role.get("who", "")) for sc in exp]
     reqs += [ai_read.video_scene_request(label, sc, fmt_time) for sc in uniq if sc.get("mode") != "experiment"]
     reqs += [ai_read.speech_fix_request(label, i, segs, vocab, fmt_time)
              for i, segs in ai_read.speech_chunks(rec.get("speech", []))]

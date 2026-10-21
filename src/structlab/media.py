@@ -240,6 +240,9 @@ def detect_content_region(path: Path, info: ProbeInfo, start: float = 0.0, lengt
     # 小さすぎる・ほぼ全体なら切り出さない
     if reg.w * reg.h < 0.04 * W * H or reg.is_full:
         return full
+    # 切り出しの安全確認用: 縮小した画面の中央値（外側＝余白・ブラウザの表示の「普段の姿」）と、その中の資料の範囲
+    reg.ref = np.median(stack, axis=0).astype(np.int16)
+    reg.ref_box = (max(0, a - pad), min(work_h, b + pad), max(0, c0 - pad), min(work_w, c1 + pad))
     return reg
 
 
@@ -263,6 +266,35 @@ def _content_box_once(stack: np.ndarray, frac: float, edge: float, line: float =
     if not cruns:
         return None
     return a, b, min(r[0] for r in cruns), max(r[1] for r in cruns)
+
+
+def crop_is_safe(path: Path, t: float, region: Region, limit: float = 0.02) -> bool:
+    """時刻 t の画面で、切り出す範囲の外が普段の姿（余白・ブラウザの表示）のままかを確かめる。
+    外にも普段と違う表示（拡大された動画、別の資料など）がある画面は、切り出さずに画面全体で保存する（情報を落とさない）。"""
+    ref = getattr(region, "ref", None)
+    if ref is None or region.is_full:
+        return True
+    h, w = ref.shape
+    try:
+        cur = grab_gray(path, t, w, h, crop=TRANSPOSE.get(region.rotate)).astype(np.int16)
+    except MediaError:
+        return False
+    a, b, c0, c1 = region.ref_box
+    diff = np.abs(cur - ref) > 40
+    diff[a:b, c0:c1] = False
+    return float(diff.mean()) <= limit
+
+
+def outside_activity(stack: np.ndarray, box: tuple[int, int, int, int], pad: int = 3) -> float:
+    """切り出す範囲（少し広げる）の外で、フレーム間で明るさが大きく変わる画素の割合。
+    時計・シークバーの小さな変化は数%未満に収まり、資料が外にはみ出していれば大きくなる（切り出しの安全確認）。"""
+    if len(stack) < 2:
+        return 0.0
+    a, b, c0, c1 = box
+    moving = (stack.max(axis=0) - stack.min(axis=0)) > 40
+    mask = np.ones(moving.shape, bool)
+    mask[max(0, a - pad):b + pad, max(0, c0 - pad):c1 + pad] = False
+    return float(moving[mask].mean()) if mask.any() else 0.0
 
 
 def _player_frame(sub: np.ndarray) -> bool:

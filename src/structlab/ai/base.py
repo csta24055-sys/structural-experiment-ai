@@ -11,6 +11,9 @@ from typing import Any
 class AIImage:
     path: Path
     label: str  # 例: "p.3" / "00:12:34 のフレーム"
+    # この画像までを API のキャッシュに置く（同じ資料の依頼で毎回先頭に付く基準画像など）。
+    # 送る内容は変わらず、2件目以降はキャッシュから読まれて入力が安くなる
+    cache: bool = False
 
 
 @dataclass

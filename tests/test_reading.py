@@ -390,26 +390,58 @@ def test_orientation_runs_detect_sideways_screen_and_ignore_blips():
     assert [r[2] for r in runs] == [0, 90] and runs[1][0] == 20.0  # 1回だけの揺れは無視
 
 
-def test_frame_size_keeps_native_resolution():
+def test_frame_size_keeps_the_resolution_the_ai_used_to_see():
+    """資料の部分が AI に見える大きさ（長辺 1568）は従来と同じ。切り出しが小さければ拡大する。"""
     from structlab.media import Region
     from structlab.reading.video_read import frame_size
     assert frame_size(Region(0, 0, 1920, 1080, 1920, 1080)) == {"max_width": 1568, "min_width": 0}
-    assert frame_size(Region(10, 10, 1196, 670, 2532, 1170)) == {"max_width": 1196, "min_width": 0}
-    small = frame_size(Region(10, 10, 668, 508, 1170, 2532))
-    assert small["max_width"] == 1000 and small["min_width"] == 1000  # 小さい領域だけ長辺 1000 まで拡大
+    assert frame_size(Region(10, 10, 886, 514, 2532, 1170)) == {"max_width": 1568, "min_width": 1568}
+    assert frame_size(Region(10, 10, 1196, 670, 2532, 1170))["max_width"] == 1568
     tall = frame_size(Region(0, 0, 1170, 2532, 1170, 2532))
     assert tall["max_width"] == int(1568 * 1170 / 2532) - int(1568 * 1170 / 2532) % 2
 
 
-def test_experiment_grid_is_evenly_spaced_and_groups_respect_segments():
+def test_experiment_windows_are_read_one_by_one_by_default():
+    """区間をまとめて読む方法は品質の確認ができていないので既定では使わない（従来どおり区間ごと）。"""
     from structlab.reading import ai_read
-    from structlab.reading.video_read import experiment_grid
-    pts = experiment_grid(0, 15) + experiment_grid(15, 30)
-    gaps = [b - a for a, b in zip(pts, pts[1:])]
-    assert gaps == [7.5, 7.5, 7.5]
+    assert ai_read.EXPERIMENT_GROUP == 1
     scenes = [{"index": i, "segment": 0 if i < 6 else 1, "start": 15 * i, "end": 15 * i + 15} for i in range(9)]
     groups = ai_read.experiment_groups(scenes, 4)
     assert [[s["index"] for s in g] for g in groups] == [[0, 1, 2, 3], [4, 5], [6, 7, 8]]
+
+
+def test_reference_image_is_cached_without_changing_the_request(tmp_path):
+    from PIL import Image
+    from structlab.models import fmt_time
+    from structlab.reading import ai_read
+    f = tmp_path / "f.jpg"
+    Image.new("RGB", (100, 60), "gray").save(f)
+    sc = {"index": 0, "start": 0, "end": 15, "frame_time": 7, "frame": str(f),
+          "events_with_frames": [{"time": 0.5, "frame": str(f)}, {"time": 14.5, "frame": str(f)}], "speech": []}
+    req = ai_read.experiment_window_request("x", sc, fmt_time, str(f), "先生")
+    assert [i.cache for i in req.images] == [True, False, False, False]  # 基準画像だけをキャッシュ
+
+
+def test_crop_is_safe_detects_content_outside(tmp_path):
+    import numpy as np
+    from structlab import media
+    reg = media.Region(100, 100, 200, 100, 400, 300)
+    reg.ref = np.full((30, 40), 20, np.int16)
+    reg.ref_box = (10, 20, 10, 30)
+    calls = []
+
+    def fake_grab(path, t, w, h, crop=None):
+        calls.append(t)
+        f = np.full((h, w), 20, np.uint8)
+        if t > 1:
+            f[:, :8] = 250  # 外側に何か映っている
+        return f
+    orig = media.grab_gray
+    media.grab_gray = fake_grab
+    try:
+        assert media.crop_is_safe(Path("x"), 0.5, reg) and not media.crop_is_safe(Path("x"), 2.0, reg)
+    finally:
+        media.grab_gray = orig
 
 
 def test_grouped_experiment_request_shares_reference(tmp_path):

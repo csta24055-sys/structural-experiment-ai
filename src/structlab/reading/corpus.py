@@ -156,7 +156,7 @@ def student_observations(records: dict[str, dict]) -> dict:
     return {"videos": out}
 
 
-def correspondence(teacher: dict, student: dict, provider, log=print) -> dict:
+def correspondence(teacher: dict, student: dict, provider, log=print, batch: bool = False) -> dict:
     if provider is None:
         return {"status": "not_run", "reason": "AI の使用が許可されていないため未実施（撮影時刻による対応付けは行わない）"}
     if not teacher["windows"] or not student["videos"]:
@@ -181,7 +181,12 @@ def correspondence(teacher: dict, student: dict, provider, log=print) -> dict:
         req = AIRequest(task="experiment_correspondence", source_label=v["path"], text=text, system=CORR_SYSTEM,
                         schema=CORR_SCHEMA, max_tokens=32000)
         try:
-            resp = provider.analyze(req)
+            if batch and hasattr(provider, "analyze_batch"):  # 同じ依頼を Batch API で（50% 引き）
+                resp = provider.analyze_batch([req], log=log)[0]
+                if isinstance(resp, Exception):
+                    raise resp
+            else:
+                resp = provider.analyze(req)
             results.append({"student": v["path"], "model": resp.model, "input_tokens": resp.input_tokens,
                             "output_tokens": resp.output_tokens, **resp.data})
         except Exception as e:  # noqa: BLE001
@@ -223,7 +228,8 @@ def analyze_corpus(cfg, out: Path, items: list, records: dict[str, dict], provid
     comp = compare_materials(items, records)
     teacher = teacher_timeline(records)
     student = student_observations(records)
-    corr = correspondence(teacher, student, provider, log)
+    corr = correspondence(teacher, student, provider, log,
+                          batch=bool((cfg.data.get("reading", {}) if cfg is not None else {}).get("batch")))
     (out / "materials.json").write_text(json.dumps(comp, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "experiment_teacher.json").write_text(json.dumps(teacher, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "experiment_student.json").write_text(json.dumps(student, ensure_ascii=False, indent=1), encoding="utf-8")

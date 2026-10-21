@@ -46,7 +46,10 @@ class AnthropicProvider(AIProvider):
         for img in req.images:
             media, data = encode_image(img.path, self.max_image_edge)
             content.append({"type": "text", "text": f"[画像: {img.label}]"})
-            content.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}})
+            block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": data}}
+            if getattr(img, "cache", False):
+                block["cache_control"] = {"type": "ephemeral"}
+            content.append(block)
         if req.schema is not None:  # 意味理解層: 本文は呼び出し側で組み立て済み
             content.append({"type": "text", "text": req.text})
         else:

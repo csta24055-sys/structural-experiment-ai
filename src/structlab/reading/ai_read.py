@@ -215,8 +215,8 @@ EXPERIMENT_SCHEMA = {
 def experiment_window_request(file_label: str, scene: dict, fmt_time, reference: str | None,
                               who: str) -> AIRequest:
     imgs = []
-    if reference:
-        imgs.append(AIImage(Path(reference), "基準画像（撮影開始時に映っていた試験体の面＝表面）"))
+    if reference:  # どの区間でも同じ基準画像が先頭に来るので、指示文と合わせてキャッシュする（内容は同じ）
+        imgs.append(AIImage(Path(reference), "基準画像（撮影開始時に映っていた試験体の面＝表面）", cache=True))
     frames = sorted([(e["time"], e["frame"]) for e in scene.get("events_with_frames", [])]
                     + [(scene["frame_time"], scene["frame"])])
     for t, f in frames:
@@ -232,9 +232,9 @@ def experiment_window_request(file_label: str, scene: dict, fmt_time, reference:
 
 
 # ---------------- 実験経過の動画（連続する区間をまとめて読む） ----------------
-#: 1回の呼び出しで読む区間の数（15 秒×4 = 1 分）。前後の区間とのつながりを見られるうえ、
-#: 指示文・基準画像・思考を区間ごとに繰り返さずに済む
-EXPERIMENT_GROUP = 4
+#: 1回の呼び出しで読む区間の数。1（従来どおり区間ごと）が既定。
+#: 2 以上にすると費用は下がる見込みだが、1区間あたりの読みの深さが保たれることを有料の比較で確認するまでは使わない
+EXPERIMENT_GROUP = 1
 
 EXPERIMENT_GROUP_SYSTEM = EXPERIMENT_SYSTEM + """
 
@@ -263,7 +263,7 @@ def experiment_group_request(file_label: str, scenes: list[dict], fmt_time, refe
                              previous: tuple[float, str] | None, who: str) -> AIRequest:
     imgs = []
     if reference:
-        imgs.append(AIImage(Path(reference), "基準画像（撮影開始時に映っていた試験体の面＝表面）"))
+        imgs.append(AIImage(Path(reference), "基準画像（撮影開始時に映っていた試験体の面＝表面）", cache=True))
     if previous:
         imgs.append(AIImage(Path(previous[1]), f"直前の画面 {fmt_time(previous[0])}（前のまとまりの最後）"))
     lines = []
@@ -310,31 +310,35 @@ def image_tokens(path: str | Path, max_edge: int = 2576) -> int:
 
 
 def plan_requests(rec: dict) -> list[tuple[str, int, int, str]]:
-    """資料1件で送る依頼の一覧 [(種類, 画像トークン, 本文の推定トークン, 項目)]（API は呼ばない）。"""
+    """資料1件で送る依頼の一覧 [(種類, 画像トークン, 本文の推定トークン, 項目, キャッシュする画像のトークン)]（API は呼ばない）。"""
     out = []
     if rec["kind"] == "pdf":
         for p in rec["pages"]:
-            out.append(("pdf_page", image_tokens(p["render"]), 600 + len("".join(p["rows"])) // 2, f"p{p['page']}"))
+            out.append(("pdf_page", image_tokens(p["render"]), 600 + len("".join(p["rows"])) // 2, f"p{p['page']}", 0))
         return out
     uniq = [sc for sc in rec["scenes"] if sc.get("same_as") is None]
     exp = [sc for sc in uniq if sc.get("mode") == "experiment"]
     ref = exp[0]["frame"] if exp else None
-    groups = experiment_groups(exp, int((rec.get("role") or {}).get("group", EXPERIMENT_GROUP)))
+    size = int((rec.get("role") or {}).get("group", EXPERIMENT_GROUP))
+    groups = experiment_groups(exp, size)
+    ref_tok = image_tokens(ref) if ref else 0
     for k, g in enumerate(groups):
-        imgs = [f for sc in g for _, f in window_frames(sc)] + ([ref] if ref else [])
-        if k > 0:
+        imgs = [f for sc in g for _, f in window_frames(sc)]
+        if size > 1 and k > 0:
             imgs.append(window_frames(groups[k - 1][-1])[-1][1])
         text = 400 + sum(len(" ".join(x["text"] for x in sc.get("speech", []))[:1500]) for sc in g)
-        out.append((f"experiment_group{len(g)}", sum(image_tokens(f) for f in imgs), text, f"exp{g[0]['index']}"))
+        kind = "experiment_window" if size == 1 else f"experiment_group{len(g)}"
+        # 基準画像はキャッシュする（cached に別に数える）
+        out.append((kind, sum(image_tokens(f) for f in imgs), text, f"exp{g[0]['index']}", ref_tok))
     for sc in uniq:
         if sc.get("mode") == "experiment":
             continue
         imgs = [sc["frame"]] + [e["frame"] for e in sc.get("events_with_frames", [])]
         kind = "video_ops" if sc.get("events_with_frames") else "video_scene"
         out.append((kind, sum(image_tokens(f) for f in imgs), 400 + min(len(sc.get("ocr") or ""), 3000) // 2,
-                    f"scene{sc['index']}"))
+                    f"scene{sc['index']}", 0))
     for i, segs in speech_chunks(rec.get("speech", [])):
-        out.append(("speech_fix", 0, 2500 + sum(len(x["text"]) for x in segs), f"speech{i}"))
+        out.append(("speech_fix", 0, 2500 + sum(len(x["text"]) for x in segs), f"speech{i}", 0))
     return out
 
 
@@ -346,17 +350,19 @@ def estimate_plan(records: dict[str, dict], *, system_tokens: int = 1800, price_
     k = 0.5 if batch else 1.0
     for path, rec in records.items():
         r = {"path": path, "calls": 0, "input_tokens": 0, "output_tokens": 0, "usd": 0.0, "by_kind": {}}
-        for kind, img, text, _item in plan_requests(rec):
+        for kind, img, text, _item, cached in plan_requests(rec):
             if kind.startswith("experiment_group"):
                 n = int(kind[len("experiment_group"):])
                 out = EST_GROUP_OUTPUT_BASE + EST_GROUP_OUTPUT_PER_WINDOW * n
                 kind = "experiment_group"
             else:
                 out = EST_OUTPUT[kind]
-            sys_in = system_tokens * ((1 - cache_hit) * 1.25 + cache_hit * 0.05)  # 書き込み 1.25 倍・読み出し 0.05 倍
-            usd = k * ((img + text + sys_in) * price_in + out * price_out) / 1e6
+            # キャッシュする先頭部分（指示文・基準画像）: 書き込み 1.25 倍・読み出し 0.05 倍。cache_hit は読み出しになる割合の仮定
+            pre = system_tokens + cached
+            pre_in = pre * ((1 - cache_hit) * 1.25 + cache_hit * 0.05)
+            usd = k * ((img + text + pre_in) * price_in + out * price_out) / 1e6
             r["calls"] += 1
-            r["input_tokens"] += img + text + system_tokens
+            r["input_tokens"] += img + text + pre
             r["output_tokens"] += out
             r["usd"] += usd
             b = r["by_kind"].setdefault(kind, {"calls": 0, "usd": 0.0})
