@@ -14,8 +14,9 @@ import urllib.request
 
 OUT = "/鋼材実験レポート用_解析結果/g5_backup"
 SOURCE = "/鋼材実験レポート用"
-CANDS = ["DROPBOX_WRITE_REFRESH_TOKEN", "DROPBOX_BACKUP_REFRESH_TOKEN", "DROPBOX_REFRESH_TOKEN_WRITE",
-         "DROPBOX_WRITE_TOKEN", "DROPBOX_REFRESH_TOKEN"]
+# 長期用のリフレッシュトークン（書き込みの許可つき、2026-10-22 に取り直し）を最優先。短期のアクセストークンは最後の予備
+CANDS = ["DROPBOX_REFRESH_TOKEN", "DROPBOX_WRITE_REFRESH_TOKEN", "DROPBOX_BACKUP_REFRESH_TOKEN", "DROPBOX_REFRESH_TOKEN_WRITE",
+         "DROPBOX_WRITE_TOKEN"]
 NAME = re.compile(r"^g5-\d{5}-[0-9a-f]{12}\.tar\.xz\.sealed$")
 assert not (OUT.lower() + "/").startswith(SOURCE.lower() + "/")  # 元資料のフォルダの中には書かない
 

@@ -2,4 +2,4 @@
 # mode: keygen（公開鍵の表示と書き込み・読み戻しの確認） / restore（Dropbox の束を作業環境の公開鍵で封をし直して取り出す）
 mode: check
 restore_pubkey:
-request: 2026-10-22 check each token separately (DROPBOX_REFRESH_TOKEN)
+request: 2026-10-22 check after exchange (write scope)
