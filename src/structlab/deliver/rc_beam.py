@@ -174,6 +174,15 @@ def corrected(r: dict) -> float:
     return r["d1"] - (r["d2"] + r["d3"]) / 2
 
 
+def valid_deflection_rows(rows: list[dict], jump_mm: float = 3.0) -> int:
+    """補正たわみが使える行数。たわみ No.2・No.3 が 1 サンプルで jump_mm 以上減る（計測不能・初期値への戻り）と、
+    それ以降の補正たわみは意味を持たないので、その直前までの行数を返す（2班のデータでは No.3 が 809 行目で -0.285 に戻る）。"""
+    for i in range(1, len(rows)):
+        if any(rows[i - 1][k] - rows[i][k] >= jump_mm for k in ("d2", "d3")):
+            return i
+    return len(rows)
+
+
 def check(inp: Inputs) -> dict:
     """入力の検査（不足・不明・矛盾を issues に加える）。数値の要約を返す。"""
     issue = lambda kind, what: inp.issues.append({"kind": kind, "what": what})  # noqa: E731

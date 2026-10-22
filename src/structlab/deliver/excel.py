@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .rc_beam import DESIGN, PRINTED, Inputs, theory
+from .rc_beam import DESIGN, PRINTED, Inputs, theory, valid_deflection_rows
 
 P_SHEET, D_SHEET = "設計条件", "測定データ"
 Q = f"'{P_SHEET}'"
@@ -100,9 +100,10 @@ def build_workbook(inp: Inputs, out: Path) -> Path:
     for label, ekey, sym, note in (("曲げひび割れ発生時せん断力 QBC", "BC", "QBC", ""),
                                    ("せん断ひび割れ発生時せん断力 QSC", "SC", "QSC", ""),
                                    ("曲げ降伏時耐力 Qy", "y", "Qy", ""),
-                                   ("最大耐力（Qmin と比較）", "max", "Qmin", "要確認: 書式に比べる理論値の指定なし"),
-                                   ("最大耐力（Qmean と比較）", "max", "Qmean", "要確認: 書式に比べる理論値の指定なし"),
-                                   ("最大耐力（Qy と比較）", "max", "Qy", "要確認: 書式に比べる理論値の指定なし")):
+                                   ("最大耐力（理論値は Qmin）", "max", "Qmin",
+                                    "理論上の最大耐力は Qmin<Qy よりせん断で決まる（講義「最大耐力はどの破壊モードで決まっているのか」）"),
+                                   ("（参考）最大耐力と Qmean", "max", "Qmean", "参考: せん断耐力の平均値式"),
+                                   ("（参考）最大耐力と Qy", "max", "Qy", "参考: 曲げ降伏時耐力（実験は曲げ降伏が先行）")):
         i = t3.max_row + 1
         tq = ev[ekey]["P_kN"] / 2 if ekey in ev else None
         t3.append([label, f"={ev[ekey]['P_kN']}/2" if tq is not None else None, f"={Q}!D{r[sym]}/1000",
@@ -130,6 +131,9 @@ def build_workbook(inp: Inputs, out: Path) -> Path:
         pts.append((f"IF({pmin}<{py},{dsc}+({pmin}-{psc})/({py}-{psc})*({dy}-{dsc}),{dy})", f"MIN({pmin},{py})"))
         for x, y in pts:
             tl.append([name, f"={x}", f"={y}"])
+    # 理論値 CQ のせん断破壊点 → 曲げ降伏点（書式 p8 の図の点線。参考）
+    tl.append(["理論値 CQ（せん断破壊点→曲げ降伏点、参考）", "=B4", "=C4"])
+    tl.append(["理論値 CQ（せん断破壊点→曲げ降伏点、参考）", f"=2*{Q}!D{r['Qy']}/{Q}!D{r['Ky']}", f"=2*{Q}!D{r['Qy']}/1000"])
     ev_sheet = wb.create_sheet("各荷重")
     ev_sheet.append(["事象", "荷重 P（kN）", "変位（データ.txt）（mm）"])
     for jp, key in (("曲げひび割れ", "BC"), ("せん断ひび割れ", "SC"), ("曲げ降伏", "y"), ("最大荷重", "max")):
@@ -139,7 +143,6 @@ def build_workbook(inp: Inputs, out: Path) -> Path:
     # 図（散布図・凡例・軸タイトル。題はグラフの下のセル）
     def scatter(x_title, y_title):
         ch = ScatterChart()
-        ch.style = 13
         ch.title = None
         ch.x_axis.title, ch.y_axis.title = x_title, y_title
         ch.legend.position = "r"
@@ -147,30 +150,41 @@ def build_workbook(inp: Inputs, out: Path) -> Path:
         ch.x_axis.delete = ch.y_axis.delete = False
         return ch
 
-    def add(ch, sheet, xcol, ycol, r0, r1, name, marker=True):
+    colors = iter(["1F77B4", "000000", "FF7F0E", "7F7F7F"] * 3)
+    strain_colors = iter(["1F77B4", "FF7F0E", "2CA02C", "D62728"] * 3)
+
+    def add(ch, sheet, xcol, ycol, r0, r1, name, marker=True, color=None, width=1.5):
+        # 講義（エクセルの作り方1）どおり「散布図（直線）」で描く。点だけの系列は LibreOffice で見えないことがあるため線にする
         s = Series(Reference(sheet, min_col=ycol, min_row=r0, max_row=r1),
                    Reference(sheet, min_col=xcol, min_row=r0, max_row=r1), title=name)
-        if marker:
-            s.marker.symbol, s.marker.size = "circle", 3
-            s.graphicalProperties.line.noFill = True
-        else:
-            s.marker.symbol = "none"
+        s.marker.symbol = "none"
+        s.smooth = False
+        s.graphicalProperties.line.solidFill = color or next(colors)
+        s.graphicalProperties.line.width = int(width * 12700)
         ch.series.append(s)
 
     figs = wb.create_sheet("図")
     c1 = scatter("補正たわみ δ（mm）", "荷重 P（kN）")
-    add(c1, wd, 11, 3, 2, last, "実験値（補正たわみ）")
-    add(c1, tl, 2, 3, 2, 4, "理論値 CQ（三折れ線）", marker=False)
+    nv = valid_deflection_rows(inp.rows)
+    add(c1, wd, 11, 3, 2, nv + 1, "実験値（補正たわみ）")
+    add(c1, tl, 2, 3, 2, 4, "理論値 CQ（三折れ線）", marker=False, width=2.5)
     add(c1, tl, 2, 3, 5, 7, "計算値 FQ（三折れ線）", marker=False)
+    c1.series[-1].graphicalProperties.line.dashStyle = "dash"
+    add(c1, tl, 2, 3, 8, 9, "理論値 CQ（せん断破壊点→曲げ降伏点、参考）", marker=False)
+    c1.series[-1].graphicalProperties.line.dashStyle = "sysDot"
+    c1.x_axis.scaling.min, c1.y_axis.scaling.min = 0, 0
     figs.add_chart(c1, "A1")
-    figs["A20"] = "図-A　荷重 P と補正たわみ δ の関係（実験値と理論値）"
+    figs["A20"] = "図-A　荷重 P と補正たわみ δ の関係（実験値と理論値）" + (
+        "" if nv == len(inp.rows) else f"。たわみ No.2・No.3 の計測が途切れる測定データ {nv + 1} 行目より前を表示")
     c2 = scatter("ひずみ（μ）", "荷重 P（kN）")
-    add(c2, wd, 7, 3, 2, last, "主筋 No.1")
+    add(c2, wd, 7, 3, 2, last, "主筋 No.1", color=next(strain_colors))
+    c2.y_axis.scaling.min = 0
     figs.add_chart(c2, "A23")
     figs["A42"] = "図-B　荷重 P と主筋のひずみの関係"
     c3 = scatter("ひずみ（μ）", "荷重 P（kN）")
     for col, name in ((8, "あばら筋 No.2"), (9, "あばら筋 No.3"), (10, "あばら筋 No.4")):
-        add(c3, wd, col, 3, 2, last, name)
+        add(c3, wd, col, 3, 2, last, name, color=next(strain_colors))
+    c3.y_axis.scaling.min = 0
     figs.add_chart(c3, "A45")
     figs["A64"] = "図-C　荷重 P とあばら筋のひずみの関係"
     for cell in ("A20", "A42", "A64"):
