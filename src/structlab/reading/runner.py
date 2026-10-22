@@ -195,7 +195,8 @@ class Reader:
             resp = provider.analyze(req)
         except Exception as e:  # noqa: BLE001  1件の失敗で全体を止めない（未照合として残る）
             with self.lock:
-                self.usage["failed"] += 1
+                self.usage["awaiting" if type(e).__name__ == "AwaitingAnswer" else "failed"] = \
+                    self.usage.get("awaiting" if type(e).__name__ == "AwaitingAnswer" else "failed", 0) + 1
                 self.usage["calls"] -= 1
             self.log(f"  AI の読み取りに失敗（{req.source_label}）: {type(e).__name__}: {str(e)[:200]}")
             return None
@@ -242,6 +243,9 @@ class Reader:
                                               on_created=created)
         for (path, req), res in zip(pending, results):
             if isinstance(res, Exception):
+                if type(res).__name__ == "AwaitingAnswer":  # 回答待ち（候補 G5）: 失敗ではない。次回続きから
+                    self.usage["awaiting"] = self.usage.get("awaiting", 0) + 1
+                    continue
                 self.usage["failed"] += 1
                 self.log(f"  AI の読み取りに失敗（{req.source_label}）: {type(res).__name__}: {str(res)[:200]}")
                 continue

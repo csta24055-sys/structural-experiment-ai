@@ -22,6 +22,7 @@ from .db import DB
 from .models import Item, UnitSpec, kind_for
 from .processors import UNSUPPORTED_HINTS, Ctx, Extraction, get_processor
 from .processors.video import focus_spec
+from .ai.base import AwaitingAnswer
 from .semantic import BudgetExceeded, SemanticEngine
 from .semantic.material import SCENE_TYPES
 from .safety import DiskSpaceError, SafetyError, ZipLimits, dropbox_content_hash, safe_extract_zip
@@ -437,6 +438,9 @@ class Pipeline:
         prov = self.provider
         try:
             resp = prov.analyze(req)
+        except AwaitingAnswer:  # 回答待ち（候補 G5）: 失敗ではないので試行回数も状態も元に戻す（次回続きから）
+            self.db.x("UPDATE units SET ai_attempts=ai_attempts-1 WHERE id=?", (uid,))
+            return
         except AIError as e:
             self._ai_failed(row, uid, e, e.retryable, len(req.images))
             return
