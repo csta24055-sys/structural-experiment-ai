@@ -283,3 +283,29 @@ def test_broken_images_are_rebuilt(tmp_path):
     Path(rec["images"][0]["path"]).write_bytes(b"\x89PNG broken")
     q.analyze_batch([req], log=lambda m: None)              # 壊れた依頼の画像は作り直す
     Image.open(rec["images"][0]["path"]).load()
+
+
+def test_pg5_rule_has_no_tolerance():
+    """M28: G5 の包含率は API どうしの包含率「以上」で合格（0.02 の許容差は無い）。重要項目・読めない件数の条件は厳格なまま。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pg5", Path(__file__).parent.parent / "scripts" / "pg5.py")
+    pg5 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pg5)
+    J = pg5.judge
+    assert J(0.9, 0.9, 1, 1, 2.0, 2)                       # 同じなら合格
+    assert J(0.9, 0.95, 1, 0, 2.0, 0)                      # 上回れば合格
+    assert J(0.1 + 0.2, 0.3, 0, 0, 0, 0)                   # 小数の計算誤差だけは吸収
+    assert not J(0.9, 0.899, 1, 1, 2.0, 2)                 # わずかに下回っても不合格（以前の基準では合格）
+    assert not J(0.9, 0.881, 1, 1, 2.0, 2)
+    assert not J(0.9, 0.95, 1, 2, 2.0, 2)                  # 重要項目を API どうしより多く落とせば不合格
+    assert not J(0.9, 0.95, 0, 0, 2.0, 4)                  # 読めない件数が多すぎれば不合格
+    assert "許容差なし" in pg5.RULE
+
+
+def test_pilot_decide_has_no_tolerance():
+    from structlab import pilot as PL
+    base = {"critical": set(), "directive": {f"d{i}" for i in range(100)}, "verdict": set()}
+    rep = {"critical": set(), "directive": {f"d{i}" for i in range(99)}, "verdict": set()}
+    cand = {"critical": set(), "directive": {f"d{i}" for i in range(98)}, "verdict": set()}
+    assert not PL.decide("semantic", base, rep, cand)["adopt"]     # 0.98 < 0.99（以前の 0.02 の許容差なら採用）
+    assert PL.decide("semantic", base, rep, rep)["adopt"]

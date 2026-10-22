@@ -13,6 +13,10 @@ anthropic>=1.0
 # GitHub Secrets への登録（値を GitHub の公開鍵で暗号化）
 pynacl>=1.5
 
+# Excel・レポートの作成（scripts/deliver.py。再計算・PDF 出力は LibreOffice）
+python-docx>=1.1
+matplotlib>=3.8
+
 # テスト用
 pytest>=8.0
 reportlab>=4.0

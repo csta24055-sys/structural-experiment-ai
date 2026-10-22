@@ -5,7 +5,7 @@ AI の出力は同じ依頼でも毎回少し違うため、次の3つを比べ�
   repeat   … 今の方式をもう一度（同じ方式どうしの揺れの大きさ）
   candidate… 候補の方式
 採用の条件（どちらも満たすときだけ採用。満たさなければ今の方式のまま）:
-  1. baseline の項目が candidate に含まれる割合 ≥ baseline の項目が repeat に含まれる割合 − 許容差（既定 0.02）
+  1. baseline の項目が candidate に含まれる割合 ≥ baseline の項目が repeat に含まれる割合（M28 で許容差を撤廃。既定 0）
   2. 重要な項目（禁止・必須の指示、数値、数式、セル番地）で、candidate だけが落としたものが repeat より多くない
 
   structlab pilot compare --kind reading|semantic --baseline DIR --repeat DIR --candidate DIR --out DIR
@@ -146,18 +146,18 @@ def containment(a: dict[str, set[str]], b: dict[str, set[str]], fuzzy: bool = Fa
 CRITICAL_KINDS = {"reading": ("number", "cell", "formula", "setting"), "semantic": ("critical",)}
 
 
-def decide(kind: str, base: dict, repeat: dict, cand: dict, tol: float = 0.02) -> dict:
+def decide(kind: str, base: dict, repeat: dict, cand: dict, tol: float = 0.0) -> dict:
     fuzzy = kind == "semantic"
     c_rep, m_rep = containment(base, repeat, fuzzy)
     c_can, m_can = containment(base, cand, fuzzy)
     crit = CRITICAL_KINDS[kind]
     crit_rep = sum(len(m_rep.get(k, [])) for k in crit)
     crit_can = sum(len(m_can.get(k, [])) for k in crit)
-    ok = c_can >= c_rep - tol and crit_can <= crit_rep
+    ok = c_can + 1e-9 >= c_rep - tol and crit_can <= crit_rep   # 1e-9 は小数の計算誤差だけ
     return {"adopt": ok, "containment_repeat": round(c_rep, 4), "containment_candidate": round(c_can, 4),
             "critical_missing_repeat": crit_rep, "critical_missing_candidate": crit_can,
             "missing_in_candidate": {k: v[:50] for k, v in m_can.items()},
-            "rule": f"候補の包含率 ≥ 同じ方式どうしの包含率 − {tol}、かつ重要項目の欠落が同じ方式どうし以下"}
+            "rule": ("候補の包含率 ≥ 同じ方式どうしの包含率" + (f" − {tol}" if tol else "（許容差なし）")) + "、かつ重要項目の欠落が同じ方式どうし以下"}
 
 
 def load_reading(d: Path) -> dict[str, set[str]]:
@@ -177,7 +177,7 @@ def load_semantic(d: Path) -> dict[str, set[str]]:
                                                                                   "verdict": set()}
 
 
-def compare(kind: str, baseline: Path, repeat: Path, candidate: Path, tol: float = 0.02) -> dict:
+def compare(kind: str, baseline: Path, repeat: Path, candidate: Path, tol: float = 0.0) -> dict:
     load = load_reading if kind == "reading" else load_semantic
     return decide(kind, load(baseline), load(repeat), load(candidate), tol)
 

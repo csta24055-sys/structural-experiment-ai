@@ -20,11 +20,16 @@ Claude Code で同じ依頼を処理し、実際の支払いを減らす。依�
    有効のままだと、利用枠を超えた分が課金される可能性がある
 2. P-G5 を行う場合だけ: Claude Code のクラウド環境の設定（セッションの題名の横の環境メニュー → 編集）に、API の鍵を
    `ANTHROPIC_API_KEY` という名前で登録（チャットには貼らない）。新しいセッションから使える
-3. Claude Code で「G5 を開始して」と伝える。その後は利用枠の上限で止まったときに「続けて」と伝える（上限は 5 時間ごとに回復。
+3. 作業フォルダの保存先（`docs/G5_BACKUP.md`）: Dropbox の認証情報（DROPBOX_APP_KEY・DROPBOX_APP_SECRET・DROPBOX_REFRESH_TOKEN）を
+   同じ環境の設定に登録し、`G5_BACKUP=dropbox` も登録する（Dropbox の解析結果フォルダへの「追加だけ」の書き込みを利用者が確認した後）
+4. Claude Code で「G5 を開始して」と伝える。その後は利用枠の上限で止まったときに「続けて」と伝える（上限は 5 時間ごとに回復。
    週の上限に達した場合は回復の日時まで待つ）
 
 ## 3. 進行役（Claude）の手順（1 周）
-1. `python3 scripts/g5_driver.py step`（取り込み → 次の依頼の作成。読み取りが全部そろうまで理解・統合に進まない）
+0. 作業フォルダが無い・消えた場合: `python3 scripts/g5_driver.py prepare <前処理の成果物>` の後に `python3 scripts/g5_backup.py restore`
+   （保存済みの答えを戻す。既存のファイルは上書きしない）。その後は同じ手順で続きから進む（戻した答えは答え直さない）
+1. `python3 scripts/g5_driver.py step`（取り込み → 保存先への保存（G5_BACKUP があるとき）→ 次の依頼の作成。
+   読み取りが全部そろうまで理解・統合に進まない）。`g5_status.json` の `backup.error` があれば止めて利用者に知らせる
 2. 追加課金の確認: セッションの情報（get_session）の `rate_limit_info.isUsingOverage` が true なら**直ちに止めて利用者に知らせる**
 3. `python3 scripts/g5_driver.py next -n <同時に起動する数>` で未回答の依頼を受け取り、1 件ごとに g5-answerer を起動
    （依頼ファイルの場所だけを渡す。同時の起動は 10 件程度まで。公式の上限は 20）

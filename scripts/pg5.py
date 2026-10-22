@@ -10,7 +10,8 @@
 
 判定（すべて満たすときだけ合格）:
   1. G5 の答えはすべて出力の形に合う（取り込み時に検査済み）
-  2. 種類ごとに、API1 の項目が G5 に含まれる割合 ≥ API1 の項目が API2 に含まれる割合 − 0.02
+  2. 種類ごとに、API1 の項目が G5 に含まれる割合 ≥ API1 の項目が API2 に含まれる割合（許容差なし。M28 で 0.02 の許容差を撤廃。
+     小数の計算の誤差だけは EPS=1e-9 で吸収する）
   3. 重要な項目（数値・セル番地・数式・設定・禁止/必須/条件付きの指示・照合の判定）で、G5 だけが落とした数が API2 以下
   4. G5 の「読めない・不確か」の件数が API の 2 回の平均の 1.25 倍＋1 以下（画像が縮小されて読めていない等の検出）
 不合格の種類（例: 細部の読み取り）があれば、その種類だけ API に戻すことを提案する（G5 と A の組み合わせ）。
@@ -136,7 +137,17 @@ def items(task: str, data) -> dict[str, set[str]]:
     return out
 
 
-def compare(work: Path, tol: float = 0.02) -> dict:
+#: 小数の平均の計算誤差だけを吸収する値（品質の許容差ではない）
+EPS = 1e-9
+RULE = "種類ごとに: G5 の包含率 ≥ API どうしの包含率（許容差なし）、重要項目の欠落 ≤ API どうし、読めない件数 ≤ API の 1.25 倍＋1"
+
+
+def judge(ca: float, cg: float, crit_api: int, crit_g5: int, unread_api: float, unread_g5: int) -> bool:
+    """1 種類の合否。ca = API1 の項目が API2 に含まれる割合、cg = API1 の項目が G5 に含まれる割合（いずれも平均）。"""
+    return cg + EPS >= ca and crit_g5 <= crit_api and unread_g5 <= 1.25 * unread_api + 1
+
+
+def compare(work: Path) -> dict:
     from structlab.pilot import containment
     from structlab.ai.queue_provider import Queue
     q = Queue(P(work)["queue"])
@@ -169,14 +180,14 @@ def compare(work: Path, tol: float = 0.02) -> dict:
     for task, r in by.items():
         ca = sum(r["api_api"]) / r["n"]
         cg = sum(r["api_g5"]) / r["n"]
-        ok = cg >= ca - tol and r["crit_g5"] <= r["crit_api"] and r["unread_g5"] <= 1.25 * r["unread_api"] + 1
+        ok = judge(ca, cg, r["crit_api"], r["crit_g5"], r["unread_api"], r["unread_g5"])
         verdict[task] = {"pass": ok, "requests": r["n"], "containment_api_vs_api": round(ca, 3),
                          "containment_api_vs_g5": round(cg, 3), "critical_missing_api2": r["crit_api"],
                          "critical_missing_g5": r["crit_g5"], "unreadable_api_avg": r["unread_api"],
                          "unreadable_g5": r["unread_g5"]}
     res = {"pass": bool(verdict) and not missing and all(v["pass"] for v in verdict.values()),
            "missing_answers": missing, "by_task": verdict,
-           "rule": "種類ごとに: G5 の包含率 ≥ API どうし − 0.02、重要項目の欠落 ≤ API どうし、読めない件数 ≤ API の 1.25 倍＋1"}
+           "rule": RULE}
     pg.mkdir(parents=True, exist_ok=True)
     (pg / "decision.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
     lines = ["# 見本の比較 P-G5 の判定", "", f"**{'合格' if res['pass'] else '不合格'}**（不足 {len(missing)} 件）", "",

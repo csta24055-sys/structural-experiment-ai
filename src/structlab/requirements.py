@@ -251,6 +251,15 @@ def check_auto(name: str, c: Ctx) -> tuple[str, str]:
         return "成功", "structlab requirements checklist / verify --stage excel|report で同じ台帳を再照合できる"
     if name == "unconfirmed_marked":
         return "成功", "判読不能・不確実な箇所を未確認事項（U 番号）として台帳に載せた（確認済みとして扱わない）"
+    if name == "pg5_no_tolerance":
+        import importlib.util
+        root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location("pg5", root / "scripts" / "pg5.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        strict = m.judge(0.9, 0.9, 0, 0, 0, 0) and not m.judge(0.9, 0.899, 0, 0, 0, 0) and not m.judge(0.9, 0.95, 0, 1, 0, 0)
+        return ("成功", "P-G5 の判定: 包含率は API どうし以上（許容差なし）、重要項目の欠落は API どうし以下") if strict else \
+            ("失敗", "P-G5 の判定に許容差が残っている、または重要項目の確認が緩い")
     if name == "conflicts_kept":
         return "成功", "矛盾は双方を残す（台帳の conflicts・意味理解の conflicts.md）"
     if name == "no_paid_run_without_approval":

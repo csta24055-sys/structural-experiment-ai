@@ -81,6 +81,20 @@ def run(cmd: list[str]) -> str:
     return r.stdout
 
 
+def backup_now(work: Path) -> dict:
+    """環境変数 G5_BACKUP（dropbox または dir:PATH）があれば、作り直せないもの（答え等）を保存する。失敗は止めずに記録する。"""
+    if not os.environ.get("G5_BACKUP"):
+        return {"enabled": False}
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("g5_backup", ROOT / "scripts" / "g5_backup.py")
+    B = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(B)
+    try:
+        return {"enabled": True, **B.push(work, B.remote(None))}
+    except Exception as e:  # noqa: BLE001  鍵などの値は出さない（例外の種類だけ）
+        return {"enabled": True, "error": type(e).__name__}
+
+
 def step(work: Path) -> dict:
     """答えを取り込み、次の依頼を作る。読み取りが全部そろうまで理解・統合には進まない（材料が欠けた理解を作らない）。"""
     from structlab.ai.queue_provider import Queue
@@ -88,6 +102,7 @@ def step(work: Path) -> dict:
     guard(P)
     q = Queue(P["queue"])
     got = q.ingest()
+    backup = backup_now(work)  # 取り込んだ答えを先に外へ保存（作業環境の回収に備える）
     py = sys.executable
     run([py, str(ROOT / "scripts" / "queue_reading.py"), str(P["files"]), "--work", str(work), "--queue", str(P["queue"]),
          "-c", str(P["cfg"])])
@@ -100,7 +115,7 @@ def step(work: Path) -> dict:
         run([py, "-m", "structlab.reading.semantic_bridge", str(P["files"]), "--out", str(P["sem"]), "-c", str(P["cfg"]),
              "--allow-external-ai"])
     s = status(work, quiet=True)
-    s.update(ingested=got, stage=stage)
+    s.update(ingested=got, stage=stage, backup=backup)
     (work / "g5_status.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
     return s
 

@@ -823,7 +823,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--baseline")
     p.add_argument("--repeat")
     p.add_argument("--candidate")
-    p.add_argument("--tolerance", type=float, default=0.02)
+    p.add_argument("--tolerance", type=float, default=0.0)
     p.add_argument("--out", default="work/pilot")
     p.add_argument("--semantic-db", help="plan: 見本の比較にかかる費用を計算する意味理解の DB（semantic.db）")
     p = sub.add_parser("queue", help="（候補 G5）Claude Code で解析する依頼の受け渡し")

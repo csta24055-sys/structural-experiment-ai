@@ -24,6 +24,11 @@
 - 手順は docs/CLAUDE_CODE_QUEUE.md。答え役は .claude/agents/g5-answerer.md（1 件ごとに新しく起動、依頼ファイルの場所だけを渡す）
 - 毎周、セッションの情報で追加課金（isUsingOverage）が true なら直ちに止めて利用者に知らせる。利用枠の上限では止まって待つ（回避しない）
 - 有料の API は使わない（g5_driver.py が設定を確認し、鍵を子の処理に渡さない）。テスト用の仮の答えを本番に混ぜない
+- 作業フォルダが消えたら `scripts/g5_backup.py restore` で答えを戻してから続ける（docs/G5_BACKUP.md。保存先への書き込みは追加だけ）
+
+## Excel・レポート（docs/DELIVERABLES.md。作成は利用者の許可の後だけ）
+- `python3 scripts/deliver.py check-inputs`（入力の検査、いつでも可）→ 許可の後に `excel --approved` / `report --content ... --approved`
+- 実験データ・出力（work/inputs, work/deliver）は個人のデータなのでコミットしない
 
 ## チェック・再検証・文章スタイル・フィードバック
 - チェックは全体設計（`src/structlab/checks/catalog.py`、要件 R1〜R15 × 工程）に沿って各工程に組み込んである。
