@@ -1,0 +1,50 @@
+# G5 の答えの保存（docs/G5_BACKUP.md）。Dropbox のトークンは GitHub Secrets から Actions の中だけで使い、作業環境に出さない。
+# Secret への書き込みはしない。束の暗号化の鍵の組は、既存の Secret（DROPBOX_APP_SECRET）から Actions の中で導出する
+# （同じ値から毎回同じ鍵。秘密鍵はどこにも保存しない。開けられるのは Dropbox の認証情報を持つ Actions だけ）。
+#   ops/requests/g5-backup.txt の mode:
+#     keygen  … 公開鍵をログに出し、書き込みと読み戻しを確認（解析結果フォルダの g5_backup/_check に小さなファイルを追加）
+#     restore … Dropbox の束を開け、依頼に書かれた作業環境の公開鍵で封をし直して成果物（artifact、1 日で消える）にする
+#   ブランチ g5-backup-transfer の transfer/*.sealed（作業環境が公開鍵で封をした束）→ Dropbox の g5_backup に追加（上書きしない）
+name: G5 backup
+
+on:
+  push:
+    paths:
+      - "ops/requests/g5-backup.txt"
+      - "transfer/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g5-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      CAND_DROPBOX_WRITE_REFRESH_TOKEN: ${{ secrets.DROPBOX_WRITE_REFRESH_TOKEN }}
+      CAND_DROPBOX_BACKUP_REFRESH_TOKEN: ${{ secrets.DROPBOX_BACKUP_REFRESH_TOKEN }}
+      CAND_DROPBOX_REFRESH_TOKEN_WRITE: ${{ secrets.DROPBOX_REFRESH_TOKEN_WRITE }}
+      CAND_DROPBOX_WRITE_TOKEN: ${{ secrets.DROPBOX_WRITE_TOKEN }}
+      CAND_DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -q pynacl
+      - name: Run
+        run: python ops/g5_backup_actions.py
+      - name: Restore artifact
+        if: hashFiles('restore_out/*') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: g5-restore
+          path: restore_out/
+          retention-days: 1

@@ -117,13 +117,119 @@ class DropboxRemote:
         return res.content
 
 
+class GithubRemote:
+    """Dropbox のトークンを作業環境に出さない保存: 束を Actions の公開鍵（ops/backup/g5-backup.pub）で封をして、
+    受け渡し専用のブランチ（g5-backup-transfer。ワークフローと transfer/ だけの独立したブランチ）に送る。
+    Actions「G5 backup」が Dropbox の g5_backup に追加する（上書きしない）。戻すときは restore-github。"""
+    BRANCH = "g5-backup-transfer"
+    FILES = (".github/workflows/g5-backup.yml", "ops/g5_backup_actions.py")
+
+    def __init__(self, tree: Path | None = None, pub: Path | None = None, push: bool = True):
+        import base64
+        self.tree = tree or ROOT / "work" / "g5-transfer"
+        self.pub = base64.b64decode((pub or ROOT / "ops" / "backup" / "g5-backup.pub").read_text().split()[0])
+        self.push_enabled = push
+
+    def _git(self, *a, cwd=None):
+        import subprocess
+        return subprocess.run(["git", *a], cwd=cwd or self.tree, check=True, capture_output=True, text=True).stdout
+
+    def _ensure(self) -> None:
+        if (self.tree / ".git").exists():
+            return
+        import shutil
+        import subprocess
+        have = self.push_enabled and subprocess.run(["git", "ls-remote", "--exit-code", "origin", self.BRANCH],
+                                                    cwd=ROOT, capture_output=True).returncode == 0
+        if have:
+            self._git("fetch", "origin", self.BRANCH, cwd=ROOT)
+            self._git("worktree", "add", "-B", self.BRANCH, str(self.tree), f"origin/{self.BRANCH}", cwd=ROOT)
+            return
+        # 独立したブランチ（他のワークフロー・資料を含めない。ブランチを作っても他の処理が動かないように）
+        self._git("worktree", "add", "--detach", str(self.tree), cwd=ROOT)
+        self._git("checkout", "-q", "--orphan", self.BRANCH)
+        self._git("rm", "-rf", "--quiet", ".")
+        for f in self.FILES:
+            (self.tree / f).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / f, self.tree / f)
+        self._git("add", *self.FILES)
+
+    def names(self) -> list[str]:
+        self._ensure()
+        return sorted(p.name[:-len(".sealed")] for p in (self.tree / "transfer").glob("g5-*.tar.xz.sealed"))
+
+    def put(self, name: str, data: bytes) -> None:
+        from nacl.public import PublicKey, SealedBox
+        self._ensure()
+        p = self.tree / "transfer" / f"{name}.sealed"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "xb") as f:   # 同じ名前があれば失敗（上書きしない）
+            f.write(SealedBox(PublicKey(self.pub)).encrypt(data))
+        self._git("add", str(p.relative_to(self.tree)))
+        self._git("commit", "-q", "-m", f"G5 の保存: {name}（暗号化した束）")
+        if self.push_enabled:
+            for i in range(4):
+                try:
+                    self._git("push", "-q", "-u", "origin", self.BRANCH)
+                    break
+                except Exception:  # noqa: BLE001  通信の失敗は待って再試行
+                    if i == 3:
+                        raise
+                    time.sleep(2 ** (i + 1))
+
+    def get(self, name: str) -> bytes:
+        raise SystemExit("この保存先から直接は戻せません。restore-github を使ってください")
+
+
+def restore_github(work: Path, wait_s: int = 900) -> dict:
+    """Actions に、Dropbox の束をこの作業環境だけが開けられる形（この復元だけの公開鍵）に封をし直してもらい、受け取って戻す。"""
+    import base64
+    import subprocess
+    import tempfile
+    from nacl.public import PrivateKey, SealedBox
+    sk = PrivateKey.generate()                                # この復元だけに使う（保存しない）
+    pub = base64.b64encode(bytes(sk.public_key)).decode()
+    req = ROOT / "ops" / "requests" / "g5-backup.txt"
+    txt = req.read_text(encoding="utf-8")
+    txt = re.sub(r"^mode:.*$", "mode: restore", txt, flags=re.M)
+    txt = re.sub(r"^restore_pubkey:.*$", f"restore_pubkey: {pub}", txt, flags=re.M)
+    txt = re.sub(r"^request:.*$", f"request: restore {time.strftime('%Y-%m-%dT%H:%M:%S')}", txt, flags=re.M)
+    req.write_text(txt, encoding="utf-8")
+    run = lambda *a: subprocess.run(a, cwd=ROOT, check=True, capture_output=True, text=True).stdout  # noqa: E731
+    run("git", "add", str(req.relative_to(ROOT)))
+    run("git", "commit", "-q", "-m", "G5 の保存: 復元の依頼（この復元だけの公開鍵）")
+    sha = run("git", "rev-parse", "HEAD").strip()
+    run("git", "push", "-q")
+    t0, rid = time.time(), None
+    while time.time() - t0 < wait_s:
+        time.sleep(15)
+        out = json.loads(run("gh", "run", "list", "--workflow", "g5-backup.yml", "--commit", sha,
+                             "--json", "databaseId,status,conclusion"))
+        if out and out[0]["status"] == "completed":
+            if out[0]["conclusion"] != "success":
+                raise SystemExit(f"Actions の復元が失敗: run {out[0]['databaseId']}")
+            rid = out[0]["databaseId"]
+            break
+    if rid is None:
+        raise SystemExit("Actions の復元が時間内に終わらなかった")
+    with tempfile.TemporaryDirectory() as td:
+        run("gh", "run", "download", str(rid), "-n", "g5-restore", "-D", td)
+        plain = Path(td) / "plain"
+        plain.mkdir()
+        for p in sorted(Path(td).glob("g5-*.tar.xz.sealed")):
+            (plain / p.name[:-len(".sealed")]).write_bytes(SealedBox(sk).decrypt(p.read_bytes()))
+        return {"actions_run": rid, **restore(work, DirRemote(plain))}
+
+
 def remote(spec: str | None):
     spec = spec or os.environ.get("G5_BACKUP") or "dropbox"
+    if spec == "github":
+        return GithubRemote()
     if spec == "dropbox":
         return DropboxRemote()
     if spec.startswith("dir:"):
         return DirRemote(Path(spec[4:]))
-    raise SystemExit(f"保存先の指定が不正です: {spec}（dropbox または dir:PATH）")
+    raise SystemExit(f"保存先の指定が不正です: {spec}（github・dropbox・dir:PATH）")
 
 
 # ---------------- 保存 ----------------
@@ -245,7 +351,7 @@ def status(work: Path) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["push", "restore", "status"])
+    ap.add_argument("action", choices=["push", "restore", "restore-github", "status"])
     ap.add_argument("--work", default=str(ROOT / "work" / "g5"))
     ap.add_argument("--to", dest="target")
     ap.add_argument("--from", dest="target")
@@ -253,6 +359,8 @@ def main() -> int:
     work = Path(a.work)
     if a.action == "status":
         r = status(work)
+    elif a.action == "restore-github":
+        r = restore_github(work)
     elif a.action == "push":
         r = push(work, remote(a.target))
     else:
