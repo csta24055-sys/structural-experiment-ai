@@ -5,14 +5,14 @@
 「API どうしの揺れ」を基準に G5 の答えが API の答えの項目を落としていないかを見る。
 
   python3 scripts/pg5.py select  [--work work/g5]                見本の依頼を選ぶ（種類ごと。無料）
-  python3 scripts/pg5.py run-api --allow-external-ai [--runs 2]  見本を API で答えさせる（有料、約 790 円。承認後だけ）
+  python3 scripts/pg5.py run-api --allow-external-ai [--runs 2]  見本を API で答えさせる（有料、約 1,000 円。承認後だけ）
   python3 scripts/pg5.py compare                                 比べて判定（無料）→ work/g5/pg5/decision.json・decision.md
 
 判定（すべて満たすときだけ合格）:
   1. G5 の答えはすべて出力の形に合う（取り込み時に検査済み）
   2. 種類ごとに、API1 の項目が G5 に含まれる割合 ≥ API1 の項目が API2 に含まれる割合 − 0.02
   3. 重要な項目（数値・セル番地・数式・設定・禁止/必須/条件付きの指示・照合の判定）で、G5 だけが落とした数が API2 以下
-  4. G5 の「読めない・不確か」の件数が API の 2 回の平均の 1.25 倍以下（画像が縮小されて読めていない等の検出）
+  4. G5 の「読めない・不確か」の件数が API の 2 回の平均の 1.25 倍＋1 以下（画像が縮小されて読めていない等の検出）
 不合格の種類（例: 細部の読み取り）があれば、その種類だけ API に戻すことを提案する（G5 と A の組み合わせ）。
 """
 from __future__ import annotations
@@ -30,7 +30,10 @@ sys.path.insert(0, str(ROOT / "src"))
 #: 種類ごとの見本の数（費用の見積もり: docs/OPTIMIZATION_M27.md）
 STRATA = {"read_pdf_page": 3, "read_video_scene": 2, "read_experiment_windows": 4, "read_video_detail": 3,
           "read_video_zoom": 2, "fix_speech": 2, "scene_analysis": 3, "scene_reinterpret": 3,
-          "directive_extraction": 3, "directive_verify": 4, "global_synthesis": 1}
+          "directive_extraction": 3, "directive_verify": 4, "global_synthesis": 1,
+          # 本番で使う場合だけ現れる種類も 1 件ずつ（無ければ選ばない）
+          "global_synthesis_part": 1, "corpus_integration": 1, "experiment_correspondence": 1,
+          "scene_reinterpret_delta": 2, "directive_verify_group": 2}
 NUM = re.compile(r"(?<![A-Za-z])[-+]?\d+(?:[.,]\d+)?")
 
 
@@ -152,8 +155,9 @@ def compare(work: Path, tol: float = 0.02) -> dict:
         row = by.setdefault(s["task"], {"n": 0, "api_api": [], "api_g5": [], "crit_api": 0, "crit_g5": 0,
                                         "unread_api": 0.0, "unread_g5": 0})
         base = {k: v for k, v in i1.items() if k != "unreadable"}
-        c_rep, m_rep = containment(base, {k: v for k, v in i2.items() if k != "unreadable"}, fuzzy=True)
-        c_g5, m_g5 = containment(base, {k: v for k, v in ig.items() if k != "unreadable"}, fuzzy=True)
+        fz = not s["task"].startswith("read_")  # 読み取りは完全一致で比べる（意味理解は言い回しの揺れを許す）
+        c_rep, m_rep = containment(base, {k: v for k, v in i2.items() if k != "unreadable"}, fuzzy=fz)
+        c_g5, m_g5 = containment(base, {k: v for k, v in ig.items() if k != "unreadable"}, fuzzy=fz)
         row["n"] += 1
         row["api_api"].append(c_rep)
         row["api_g5"].append(c_g5)
@@ -201,7 +205,8 @@ def main() -> int:
         if not a.allow_external_ai:
             raise SystemExit("有料の比較です。利用者の承認後に --allow-external-ai を付けて実行してください")
         if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise SystemExit("ANTHROPIC_API_KEY がありません（GitHub Actions の pg5 ワークフローで実行してください）")
+            raise SystemExit("ANTHROPIC_API_KEY がありません。Claude Code のクラウド環境の設定に ANTHROPIC_API_KEY を登録し、"
+                             "新しいセッションで同じ作業フォルダ（work/g5）から実行してください（依頼の画像はこの環境にだけある）")
         run_api(work, a.runs, config=a.config)
     else:
         res = compare(work)

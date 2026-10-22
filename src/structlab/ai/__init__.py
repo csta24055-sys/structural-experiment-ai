@@ -29,7 +29,8 @@ def make_provider(cfg, allow_external_flag: bool = False) -> tuple[AIProvider | 
             return None, "外部AIへの送信が許可されていません（Claude Code も Anthropic に送るので許可が必要）"
         from pathlib import Path
         from .queue_provider import QueueProvider
-        return QueueProvider(Path(ai.get("queue_dir") or "work/queue"), model_label=f"claude-code:{ai['model']}"), "ok"
+        return QueueProvider(Path(ai.get("queue_dir") or "work/queue"), model_label=f"claude-code:{ai['model']}",
+                             max_edge=int(ai.get("max_image_edge", 2576))), "ok"
     raise AIError(f"未知のプロバイダ: {p}", retryable=False)
 
 

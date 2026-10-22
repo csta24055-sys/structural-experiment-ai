@@ -9,7 +9,7 @@
   最適化後の保存（after-M24）、比較資料
 
 ## 承認待ち（利用者の判断が必要）
-- **G5（Claude Code で解析）と比較 P-G5（API 約 790 円）**: 実行の準備は完了。承認後の操作は docs/CLAUDE_CODE_QUEUE.md §2
+- **G5（Claude Code で解析）と比較 P-G5（API 約 1,000 円）**: 実行の準備は完了。承認後の操作は docs/CLAUDE_CODE_QUEUE.md §2
 - G5 の作業フォルダの保存先（作業環境が止まると消える。Dropbox の解析結果フォルダへの保存を許可するか）
 - 有料 AI の本番解析（読み取り 約 7,086 円＋理解・統合 約 10,618 円＝約 17,704 円、mid）
 - 推奨の比較 P2（C1+C4+C5、再解釈から先、約 1,036 円）: `semantic.stop_before: reinterpret` で止め、

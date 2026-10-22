@@ -59,7 +59,7 @@ def tile_boxes(w: int, h: int, max_edge: int = READ_MAX_EDGE, overlap: int = TIL
     import math
 
     def spans(n):
-        k = math.ceil((n - overlap) / (max_edge - overlap))
+        k = 1 if n <= max_edge else max(2, math.ceil((n - overlap) / (max_edge - overlap)))
         step = (n - max_edge) / (k - 1) if k > 1 else 0
         return [(round(i * step), round(i * step) + min(max_edge, n)) for i in range(k)]
     return [(x0, y0, x1, y1) for y0, y1 in spans(h) for x0, x1 in spans(w)]
@@ -173,7 +173,9 @@ class Queue:
             self._reject(rec["id"], ap.read_text(encoding="utf-8", errors="replace"), ["answers の JSON が壊れている"])
             ap.unlink()
             return None
-        if a.get("record_sha256") != rec["record_sha256"] or validate(a.get("data"), rec["schema"]):
+        # 依頼のファイルが書き換えられていないか（中身から指紋を計算し直す）と、答えがその依頼のものかを確かめる
+        if record_digest(rec) != rec.get("record_sha256") or a.get("record_sha256") != rec["record_sha256"] \
+                or validate(a.get("data"), rec["schema"]):
             self._reject(rec["id"], json.dumps(a, ensure_ascii=False), ["依頼が変わった・形に合わない（answers）"])
             ap.unlink()
             return None
@@ -184,6 +186,7 @@ class Queue:
         p = self.root / "rejected" / f"{rid}.{n}.json"
         p.write_text(json.dumps({"why": why, "content": content}, ensure_ascii=False, indent=1), encoding="utf-8")
         self.log(event="rejected", id=rid, why=why)
+        (self.root / "assigned" / rid).unlink(missing_ok=True)  # 答え直せるように、受け渡し中の印を外す
         return p
 
     def ingest(self, model_label: str = "") -> dict:
@@ -211,15 +214,24 @@ class Queue:
                 out["rejected"] += 1
                 p.unlink()
                 continue
-            data = body.get("data", body) if isinstance(body, dict) and set(body) <= {"data", "model", "note"} else body
+            if not (isinstance(body, dict) and "data" in body):  # 決まった形 {"data": ..., "model": ...} だけを受け付ける
+                self._reject(rid, raw, ['形が {"data": <答え>, "model": "..."} ではない'])
+                out["rejected"] += 1
+                p.unlink()
+                continue
+            if record_digest(rec) != rec.get("record_sha256"):
+                self._reject(rid, raw, ["依頼のファイルが書き換えられている（作り直しが必要）"])
+                out["rejected"] += 1
+                p.unlink()
+                continue
+            data = body["data"]
             errs = validate(data, rec["schema"])
             if errs:
                 self._reject(rid, raw, errs)
                 out["rejected"] += 1
                 p.unlink()
                 continue
-            ans = {"data": data, "model": (body.get("model") if isinstance(body, dict) and "data" in body else None)
-                   or model_label, "answered_by": "claude-code", "record_sha256": rec["record_sha256"],
+            ans = {"data": data, "model": body.get("model") or model_label, "answered_by": "claude-code", "record_sha256": rec["record_sha256"],
                    "ingested_at": time.time()}
             tmp = self.root / "answers" / f".{rid}.tmp"
             tmp.write_text(json.dumps(ans, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -25,6 +25,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 FAKE_MODEL = "TEST-FAKE（本番では使えない）"
+#: テスト用の仮の答えを一度でも使った作業フォルダの印。結果（読み取り・意味理解）に仮の答えが残りうるので、二度と完了にしない
+TEST_MARK = "TEST_ONLY_DO_NOT_USE"
 ASSIGN_TTL = 2 * 3600  # 受け渡し中の印の有効時間（答え役が止まった場合はこの後に再び渡す）
 
 
@@ -51,6 +53,8 @@ def guard(P: dict) -> None:
 def prepare(work: Path, dirs: list[str], config: str) -> None:
     import yaml
     P = paths(work)
+    if (work / TEST_MARK).exists():
+        raise SystemExit(f"{work} はテスト用の仮の答えを使ったフォルダです。本番には新しいフォルダを使ってください")
     work.mkdir(parents=True, exist_ok=True)
     c = yaml.safe_load(Path(config).read_text(encoding="utf-8"))
     c["ai"].update(provider="claude_code_queue", queue_dir=str(P["queue"].resolve()), escalation_model="",
@@ -124,17 +128,20 @@ def status(work: Path, quiet: bool = False) -> dict:
     if cj.exists():
         corr = json.loads(cj.read_text(encoding="utf-8")).get("status")
     files = [json.loads(p.read_text(encoding="utf-8")) for p in P["files"].glob("*/reading.json")]
-    complete = (not pend and bool(reqs) and not fake and sem_done is not None and sem_done["docs"] > 0
+    tainted = (work / TEST_MARK).exists()
+    complete = (not tainted and not pend and bool(reqs) and not fake and sem_done is not None
+                and sem_done["docs"] == len(files) and sem_done is not None and sem_done["docs"] > 0
                 and sem_done["done"] == sem_done["docs"] and sem_done["corpus"] and corr not in (None, "awaiting"))
     s = {"requests": len(reqs), "answered": len(reqs) - len(pend), "pending": len(pend),
          "rejected_files": len(list((P["queue"] / "rejected").glob("*.json"))),
          "by_task": {f"{t} {'未回答' if p else '回答済み'}": n for (t, p), n in sorted(by_task.items())},
          "materials": len(files), "semantic": sem_done, "correspondence": corr, "fake_answers": len(fake),
+         "test_only": tainted,
          "complete": complete}
     if not quiet:
         print(json.dumps(s, ensure_ascii=False, indent=1))
-        if fake:
-            print(f"注意: テスト用の仮の答えが {len(fake)} 件あります。本番の完了とは判定しません")
+        if fake or tainted:
+            print("注意: テスト用の仮の答えを使ったフォルダです。本番の完了とは判定しません")
     return s
 
 
@@ -151,6 +158,11 @@ def next_ids(work: Path, n: int) -> list[str]:
             continue  # 別の答え役が答えている途中
         if (P["queue"] / "inbox" / f"{rid}.json").exists():
             continue  # 答えは届いていて、取り込み待ち
+        from structlab.ai.queue_provider import record_digest, render_markdown
+        rec = q.request(rid)
+        if record_digest(rec) != rec.get("record_sha256"):
+            continue  # 書き換えられた依頼は渡さない（step で作り直す）
+        (P["queue"] / "requests" / f"{rid}.md").write_text(render_markdown(rec), encoding="utf-8")  # 読む文面を依頼と一致させる
         mark.touch()
         out.append(rid)
         if len(out) >= n:
@@ -162,6 +174,7 @@ def fake_answer(work: Path) -> int:
     """テスト専用: 出力の形にだけ合う最小の答えを書く（処理の流れの確認用。中身は意味を持たない）。"""
     from structlab.ai.queue_provider import Queue
     q = Queue(paths(work)["queue"])
+    (work / TEST_MARK).write_text("テスト用の仮の答えを使ったフォルダ（本番に使わない）\n", encoding="utf-8")
 
     def minimal(s):
         if "anyOf" in s:

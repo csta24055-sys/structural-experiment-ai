@@ -230,3 +230,38 @@ def test_request_markdown_is_complete_and_line_split(tmp_path):
     assert lines[-1] == END_MARK and f"全 {len(lines)} 行" in lines[0]
     assert P.COMMON_SYSTEM.split("\n")[0] in md and "directive_class" in md and "f.png" not in md.split("## 資料")[0][:0]
     assert max(len(x) for x in lines) < 2000
+
+
+def test_review_fixes_tamper_wrapper_thin_tiles(tmp_path):
+    from structlab.ai.queue_provider import Queue, tile_boxes
+    assert tile_boxes(1, 2001) and all(y1 - y0 <= 2000 for _, y0, _, y1 in tile_boxes(1, 2001))
+    q = QueueProvider(tmp_path / "q")
+    Q = Queue(tmp_path / "q")
+    req = _one(tmp_path)
+    q.analyze_batch([req], log=lambda m: None)
+    rid = Q.pending()[0]
+    (tmp_path / "q" / "inbox" / f"{rid}.json").write_text('{"ok": 1}', encoding="utf-8")   # 決まった形でない
+    assert Q.ingest()["rejected"] == 1
+    (tmp_path / "q" / "inbox" / f"{rid}.json").write_text('{"data": {"ok": 1}}', encoding="utf-8")
+    assert Q.ingest()["accepted"] == 1
+    rp = tmp_path / "q" / "requests" / f"{rid}.json"
+    rec = json.loads(rp.read_text(encoding="utf-8"))
+    rec["text"] = "書き換え"                                                                 # 依頼の書き換え
+    rp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+    assert Q.answer_for(rec) is None
+
+
+def test_fake_answers_taint_the_work_folder_forever(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("g5", Path(__file__).parent.parent / "scripts" / "g5_driver.py")
+    g5 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g5)
+    work = tmp_path / "g5"
+    g5.prepare(work, [], str(Path(__file__).parent.parent / "configs" / "dropbox.yaml"))
+    QueueProvider(work / "queue").analyze_batch([_one(tmp_path)], log=lambda m: None)
+    g5.fake_answer(work)
+    for p in (work / "queue" / "answers").glob("*.json"):   # 仮の答えを消しても
+        p.unlink()
+    assert g5.status(work, quiet=True)["test_only"] and not g5.status(work, quiet=True)["complete"]
+    with pytest.raises(SystemExit):                          # 本番に使い回せない
+        g5.prepare(work, [], str(Path(__file__).parent.parent / "configs" / "dropbox.yaml"))
