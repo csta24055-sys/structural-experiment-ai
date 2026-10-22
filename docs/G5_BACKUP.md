@@ -59,3 +59,18 @@
 
 いずれも Dropbox への書き込みは元資料のフォルダの外・追加だけ。書き込みを始める前に利用者の確認を得る（台帳 P090 との関係は P153 の conflicts）。
 認可コードは数分で失効するため、コードを環境変数に置いて新しいセッションで交換する方式は使えない。
+
+## 6. 実際に使う方式（2026-10-22、M30・M31）: GitHub Actions の中で保存
+作業環境に Dropbox の認証情報を出さない方式。利用者の明示の許可のもとで実装・検証した。
+- 保存: `python3 scripts/g5_backup.py push --to github` → 束を Actions の公開鍵（`ops/backup/g5-backup.pub`）で封をして、
+  受け渡し専用のブランチ `g5-backup-transfer`（ワークフローと `transfer/` だけの独立したブランチ）に送る →
+  Actions「G5 backup」（`.github/workflows/g5-backup.yml`）が Dropbox の `/鋼材実験レポート用_解析結果/g5_backup/` に追加（上書きしない、読み戻しで確認）
+- 鍵: Actions が既存の Secret（DROPBOX_APP_SECRET）から毎回同じ鍵の組を導出する。Secret への書き込みはしない。秘密鍵はどこにも保存しない
+- 復元: `python3 scripts/g5_backup.py restore-github --work work/g5` → この復元だけの鍵の組を作り、公開鍵を依頼に書いて push →
+  Actions が Dropbox の束を開けて、その公開鍵で封をし直して成果物（1 日で消える）にする → 受け取って開け、通常の復元（上書きしない）
+- 許可: 毎周の送信だけを `.claude/settings.json` で許可（`Bash(python3 scripts/g5_backup.py push --to github)`）
+- 検証（2026-10-22）: 書き込み・読み戻し OK（Actions run 39737611033）→ 合成の束の保存 OK（39737805047、読み戻し一致）→
+  空のフォルダへの復元 OK（39737962948、元と同一）
+- **制限**: 利用者が登録した `DROPBOX_WRITE_TOKEN` はリフレッシュトークンではなくアクセストークン（リフレッシュとしては invalid_grant、
+  アクセストークンとしては書き込み可）。Dropbox のアクセストークンは通常数時間で失効する。長期の保存には、書き込みの許可つきの
+  リフレッシュトークンが必要（既存の `DROPBOX_REFRESH_TOKEN` は書き込みの許可なし: HTTP 401）
