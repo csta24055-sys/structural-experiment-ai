@@ -82,6 +82,9 @@ def figures(inp: Inputs, outdir: Path) -> dict[str, dict]:
         if ys[-1] / 1000 < py_c - 1e-9:   # せん断破壊点から曲げ降伏点までは点線（書式の図）
             ax.plot([xs[-1], dy_c], [ys[-1] / 1000, py_c], ":", lw=2, color="black")
             ax.scatter([dy_c], [py_c], s=25, color="black", zorder=5)
+            # せん断破壊後の耐力低下（書式 p8 の図－2 の下向きの破線矢印）
+            ax.annotate("", xy=(xs[-1] + 0.35 * dy_c, ys[-1] / 1000 * 0.8), xytext=(xs[-1], ys[-1] / 1000),
+                        arrowprops=dict(arrowstyle="->", ls="--", color="black", lw=1))
         ax.plot([0, dy_c * 1.25], [0, py_c * 1.25], "-", lw=0.7, color="gray", label="降伏時の剛性 Ky（理論値）")
         fx, fy = zip(*f["trilinear_mm_N"])
         ax.plot(fx, [y / 1000 for y in fy], "--", lw=1.2, color="tab:orange", label="計算値 FQ（三折れ線）")
