@@ -108,6 +108,43 @@ def writer_token():
     sys.exit("書き込みのできるトークンがありません")
 
 
+def check_all():
+    """Secret の候補を 1 つずつ、成功しても止めずに確かめる（リフレッシュ・許可の種類・書き込み・読み戻し）。値は表示しない。"""
+    def why(e):
+        try:
+            j = json.loads(e.read().decode(errors="replace"))
+            return j.get("error_summary") or j.get("error_description") or j.get("error") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+    run = os.environ.get("GITHUB_RUN_ID", str(int(time.time())))
+    for n in CANDS:
+        if not os.environ.get("CAND_" + n):
+            print(f"{n}: 未登録")
+            continue
+        try:
+            raw = json.loads(http("https://api.dropbox.com/oauth2/token", form={
+                "grant_type": "refresh_token", "refresh_token": os.environ["CAND_" + n],
+                "client_id": os.environ["DROPBOX_APP_KEY"], "client_secret": os.environ["DROPBOX_APP_SECRET"]}))
+            tok = raw["access_token"]
+            print(f"::add-mask::{tok}")
+            print(f"{n}: リフレッシュ OK（許可の種類: {raw.get('scope') or '応答に含まれない'}）")
+        except urllib.error.HTTPError as e:
+            print(f"{n}: リフレッシュ不可（HTTP {e.code} {why(e)}）")
+            continue
+        try:
+            api(tok, "files/list_folder", {"path": SOURCE, "limit": 1})
+            print(f"{n}: 読み取り（元資料の一覧）OK")
+        except urllib.error.HTTPError as e:
+            print(f"{n}: 読み取り不可（HTTP {e.code} {why(e)}）")
+        try:
+            body = f"G5 の保存の書き込み確認（run {run}、{n}）。削除してかまいません。\n".encode()
+            r = upload(tok, f"{OUT}/_check/refresh-check-{run}-{n}.txt", body)
+            ok = download(tok, r["path_display"]) == body
+            print(f"{n}: 書き込み OK・読み戻し {'OK' if ok else '不一致'} → {r['path_display']}")
+        except urllib.error.HTTPError as e:
+            print(f"{n}: 書き込み不可（HTTP {e.code} {why(e)}）")
+
+
 def transfer(tok):
     have = listing(tok)
     n = 0
@@ -156,6 +193,8 @@ def main():
     elif mode == "keygen":
         print("G5_BACKUP_PUBLIC_KEY=" + base64.b64encode(bytes(backup_key().public_key)).decode())
         writer_token()
+    elif mode == "check":
+        check_all()
     elif mode == "restore":
         restore(writer_token(), re.search(r"^restore_pubkey:\s*(\S+)", req, re.M).group(1))
     else:
