@@ -75,19 +75,36 @@ def writer_token():
     have = {n: bool(os.environ.get("CAND_" + n)) for n in CANDS}
     print("登録の有無:", json.dumps(have))
     run = os.environ.get("GITHUB_RUN_ID", str(int(time.time())))
+    def why(e):
+        """エラーの種類だけ（Dropbox の error_summary・error。値は含まない）。"""
+        try:
+            j = json.loads(e.read().decode(errors="replace"))
+            return j.get("error_summary") or j.get("error") or ""
+        except Exception:  # noqa: BLE001
+            return ""
     for n in CANDS:
         if not have[n]:
             continue
+        kinds = []
         try:
-            tok = token(n)
-            body = f"G5 の保存の書き込み確認（run {run}）。削除してかまいません。\n".encode()
-            r = upload(tok, f"{OUT}/_check/write-check-{run}-{n}.txt", body)
-            ok = download(tok, r["path_display"]) == body
-            print(f"{n}: 書き込み OK・読み戻し {'OK' if ok else '不一致'} → {r['path_display']}")
-            if ok:
-                return tok
+            kinds.append(("リフレッシュトークン", token(n)))
         except urllib.error.HTTPError as e:
-            print(f"{n}: 書き込み不可（HTTP {e.code}）")
+            print(f"{n}: リフレッシュトークンとしては使えない（HTTP {e.code} {why(e)}）")
+            val = os.environ["CAND_" + n].strip()
+            print(f"::add-mask::{val}")
+            kinds.append(("アクセストークン", val))     # 登録された値がアクセストークンの場合
+        for kind, tok in kinds:
+            try:
+                body = f"G5 の保存の書き込み確認（run {run}）。削除してかまいません。\n".encode()
+                r = upload(tok, f"{OUT}/_check/write-check-{run}-{n}.txt", body)
+                ok = download(tok, r["path_display"]) == body
+                print(f"{n}（{kind}として）: 書き込み OK・読み戻し {'OK' if ok else '不一致'} → {r['path_display']}")
+                if ok:
+                    if kind == "アクセストークン":
+                        print("注意: アクセストークンは数時間で失効する（長期の保存にはリフレッシュトークンが必要）")
+                    return tok
+            except urllib.error.HTTPError as e:
+                print(f"{n}（{kind}として）: 書き込み不可（HTTP {e.code} {why(e)}）")
     sys.exit("書き込みのできるトークンがありません")
 
 

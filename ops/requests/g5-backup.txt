@@ -2,4 +2,4 @@
 # mode: keygen（公開鍵の表示と書き込み・読み戻しの確認） / restore（Dropbox の束を作業環境の公開鍵で封をし直して取り出す）
 mode: keygen
 restore_pubkey:
-request: 2026-10-22 enable G5 backup via Actions
+request: 2026-10-22 retry: report error kinds, try value as access token
