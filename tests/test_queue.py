@@ -265,3 +265,21 @@ def test_fake_answers_taint_the_work_folder_forever(tmp_path):
     assert g5.status(work, quiet=True)["test_only"] and not g5.status(work, quiet=True)["complete"]
     with pytest.raises(SystemExit):                          # 本番に使い回せない
         g5.prepare(work, [], str(Path(__file__).parent.parent / "configs" / "dropbox.yaml"))
+
+
+def test_broken_images_are_rebuilt(tmp_path):
+    """途中で止まって壊れた画像（拡大画像・依頼の画像）は使わず作り直す。"""
+    from PIL import Image
+    from structlab.reading import detail as D
+    src = tmp_path / "f.webp"
+    Image.new("RGB", (100, 60), "white").save(src, lossless=True)
+    out = D.overview(src)
+    out.write_bytes(b"RIFF\x00broken")                      # 書きかけ
+    assert D.overview(src) == out and Image.open(out).size == (200, 120)
+    q = QueueProvider(tmp_path / "q")
+    req = _one(tmp_path)
+    q.analyze_batch([req], log=lambda m: None)
+    rec = json.loads(pending(tmp_path / "q")[0].read_text(encoding="utf-8"))
+    Path(rec["images"][0]["path"]).write_bytes(b"\x89PNG broken")
+    q.analyze_batch([req], log=lambda m: None)              # 壊れた依頼の画像は作り直す
+    Image.open(rec["images"][0]["path"]).load()

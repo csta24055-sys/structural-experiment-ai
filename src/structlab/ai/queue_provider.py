@@ -47,9 +47,21 @@ def api_view(path: Path, dest: Path, max_edge: int, lossless: bool) -> dict:
     with Image.open(io.BytesIO(base64.standard_b64decode(data))) as im:
         im = im.convert("RGB")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        im.save(dest, format="PNG")
+        tmp = dest.with_name(dest.stem + ".tmp.png")
+        im.save(tmp, format="PNG")
+        tmp.replace(dest)  # 途中で止まっても壊れた画像を残さない
         w, h = im.size
     return {"width": w, "height": h, "api_media_type": media}
+
+
+def _readable(path: Path) -> bool:
+    from PIL import Image
+    try:
+        with Image.open(path) as im:
+            im.load()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def tile_boxes(w: int, h: int, max_edge: int = READ_MAX_EDGE, overlap: int = TILE_OVERLAP) -> list[tuple[int, int, int, int]]:
@@ -72,8 +84,10 @@ def write_tiles(png: Path, out_dir: Path) -> list[str]:
         paths = []
         for k, b in enumerate(boxes, 1):
             dest = out_dir / f"{png.stem}_t{k}.png"
-            if not dest.exists():
-                im.crop(b).save(dest, format="PNG")
+            if not dest.exists() or not _readable(dest):
+                tmp = dest.with_name(dest.stem + ".tmp.png")
+                im.crop(b).save(tmp, format="PNG")
+                tmp.replace(dest)
             paths.append(str(dest.resolve()))
     return paths
 
@@ -87,7 +101,7 @@ def request_record(req: AIRequest, images_dir: Path | None = None, max_edge: int
         row = {"label": i.label, "source": str(Path(i.path).resolve()), "lossless": bool(getattr(i, "lossless", False))}
         if images_dir is not None:
             dest = images_dir / rid / f"{n:02d}.png"
-            if not dest.exists():
+            if not dest.exists() or not _readable(dest):
                 row.update(api_view(Path(i.path), dest, max_edge, row["lossless"]))
             else:
                 from PIL import Image
@@ -257,7 +271,8 @@ class QueueProvider(AIProvider):
         rp = self.dir / "requests" / f"{rid}.json"
         if rp.exists():
             rec = json.loads(rp.read_text(encoding="utf-8"))
-            missing = [p for i in rec["images"] for p in [i["path"], *i.get("tiles", [])] if not Path(p).exists()]
+            missing = [p for i in rec["images"] for p in [i["path"], *i.get("tiles", [])]
+                       if not Path(p).exists() or not _readable(Path(p))]
             if rec.get("version") != RECORD_VERSION or missing:  # 古い・画像が欠けた依頼は作り直す
                 rec = None
         else:

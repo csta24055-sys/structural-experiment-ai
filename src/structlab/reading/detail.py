@@ -48,13 +48,26 @@ def derive(src: str | Path, tag: str, scale: float, box: tuple[int, int, int, in
     """src（元の解像度）の box（画素）を scale 倍にした可逆画像。"""
     src = Path(src)
     out = _out(src, tag)
-    if out.exists():
+    if out.exists() and _readable(out):
         return out
     im = _open(src)
     if box:
         im = im.crop(box)
-    _scaled(im, scale).save(out, lossless=True, method=4)
+    # 途中で止まっても壊れた画像を残さない（一時ファイルに書いてから置き換える）。壊れた既存のファイルは作り直す
+    tmp = out.with_name(out.stem + ".tmp.webp")
+    _scaled(im, scale).save(tmp, lossless=True, method=4)
+    tmp.replace(out)
     return out
+
+
+def _readable(path: Path) -> bool:
+    from PIL import Image
+    try:
+        with Image.open(path) as im:
+            im.load()
+        return True
+    except Exception:  # noqa: BLE001  壊れた・書きかけの画像
+        return False
 
 
 def overview(src: str | Path, scale: float = OVERVIEW_SCALE) -> Path:
