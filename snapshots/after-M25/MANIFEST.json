@@ -1,0 +1,656 @@
+{
+ "name": "after-M25",
+ "commit": "675aa314021d53d208024a5f479e494ca56a2b7a",
+ "commit_subject": "M25: 3大原則の台帳、出力の差分化（候補C5）・Excel の全体画面の倍率（候補D1）、保存の効率化",
+ "commit_date": "2026-10-21T23:54:55+00:00",
+ "branch": "claude/wonderful-franklin-3tnt72",
+ "created_at": "2026-10-21T23:54:57+00:00",
+ "scope": "Git で管理しているファイル一式（ソース・設定・ワークフロー・テスト・文書・要求事項の台帳）。実データ・解析結果・秘密情報は含まない",
+ "files": [
+  {
+   "path": ".env.example",
+   "bytes": 261,
+   "sha256": "27b47d77a5c30defd4113c1feed24e89a9de71d160b4376daedc38cc5cb0e098"
+  },
+  {
+   "path": ".github/workflows/analyze.yml",
+   "bytes": 2893,
+   "sha256": "bae06e6b95abb2bc4fe9a576efa00242b16a51ec39614d34ad515e2995aefb90"
+  },
+  {
+   "path": ".github/workflows/connection-check.yml",
+   "bytes": 2764,
+   "sha256": "1a4d8a0338707ab8414f7f641b386b64da91fb8334d78995017a6aa49d863c8a"
+  },
+  {
+   "path": ".github/workflows/dropbox-auth.yml",
+   "bytes": 3019,
+   "sha256": "77418475ba44b1bd68d57b3ec17802564bc8c04409a9b6417cec2b859d015234"
+  },
+  {
+   "path": ".github/workflows/reading.yml",
+   "bytes": 8408,
+   "sha256": "8b78ea49004d41f26c9cdcc0eb363de1483f650a5140b6e7fd7980e9cca5d743"
+  },
+  {
+   "path": ".github/workflows/tests.yml",
+   "bytes": 673,
+   "sha256": "d2cf9e327ec4bb6dcbd1e849ead1595d80d5f02bf11581e00462848fffd1fc04"
+  },
+  {
+   "path": ".gitignore",
+   "bytes": 4972,
+   "sha256": "72d6d9cad2148c6edae876c4a4b23b10320c07cc8a61b44b052b5f4e7c4831f7"
+  },
+  {
+   "path": "CLAUDE.md",
+   "bytes": 5245,
+   "sha256": "aeef59e9fc4f9d2bd85fdb3dd536fd76ce406a489d4f7928fc0bb5a2692e5a1b"
+  },
+  {
+   "path": "README.md",
+   "bytes": 16250,
+   "sha256": "4bb254418576919d73182ddd70d768d6c3b3903e943a67be6352d9adfb0a0aed"
+  },
+  {
+   "path": "config.example.yaml",
+   "bytes": 7464,
+   "sha256": "886e5be8a2d6b58a46d0d4d5a2ad8a62c752e3bb47534da2a9b509c0fde90eb3"
+  },
+  {
+   "path": "configs/dropbox.yaml",
+   "bytes": 6520,
+   "sha256": "fde9a680e25ca582b724f78dc17d1f0b1519abcb1748d9710aaf14db5981e77f"
+  },
+  {
+   "path": "docs/CHECKS.md",
+   "bytes": 7084,
+   "sha256": "9e63c3d2df6d392da51e0e98583818b4e4139ee506d832d9b8cd18e5b1e4adb4"
+  },
+  {
+   "path": "docs/CLOUD_RUN.md",
+   "bytes": 4064,
+   "sha256": "f89e9c441c002e0e2626c2d94b3e877147966f19657b87b63ee9b14bd4f60e44"
+  },
+  {
+   "path": "docs/COSTS.md",
+   "bytes": 6727,
+   "sha256": "f869ae3479fdb19fad774b3cc466dca2a0cdef2f5217acfb9bf4473a44f1e456"
+  },
+  {
+   "path": "docs/OPTIMIZATION_M24.md",
+   "bytes": 16723,
+   "sha256": "2eecf5c2e0f382494a9a17067ee4d317d96da3b5334180474ab73c13833c3e9c"
+  },
+  {
+   "path": "docs/OPTIMIZATION_M25.md",
+   "bytes": 6574,
+   "sha256": "4beca1fd1f118459e8ff4518b5cc03167b4519ceee6de3d8fc35e1c3d331d964"
+  },
+  {
+   "path": "docs/READING.md",
+   "bytes": 10007,
+   "sha256": "4c192c6f59cf902a7a44af999e46adcbd0fe4091db834d16ea9c4552635daa73"
+  },
+  {
+   "path": "docs/SEMANTIC.md",
+   "bytes": 8205,
+   "sha256": "bc3f25126fd1a8a965d892491dc339fea581ada1f75bceb134fcdc1e0291d3c4"
+  },
+  {
+   "path": "docs/SETUP_AI.md",
+   "bytes": 4937,
+   "sha256": "118d10db0a9c8375f95a697b4f94b303f1f605e6d318cf4848f3faa3050c5966"
+  },
+  {
+   "path": "docs/SETUP_DROPBOX.md",
+   "bytes": 10993,
+   "sha256": "c27a3e00809bfa2193012de67a94d16c6d1a443024607eeec75445c89dfb958f"
+  },
+  {
+   "path": "docs/STYLE.md",
+   "bytes": 3496,
+   "sha256": "467b9bd9086cb8929bc83ad6fe4c774b0d71ca395a36e14b17aa52bfd8f3ab10"
+  },
+  {
+   "path": "docs/TROUBLESHOOTING.md",
+   "bytes": 5865,
+   "sha256": "920423602e62dddd347370aa51b8d73ae56e642fdfa638588f4a853ea06e4da6"
+  },
+  {
+   "path": "docs/VERIFICATION.md",
+   "bytes": 19058,
+   "sha256": "ce92f339a798954b3a9b5ae5a8f6d1e22b0525d2b6951d98542971d6b1b56c12"
+  },
+  {
+   "path": "docs/handoff/DECISIONS.md",
+   "bytes": 6591,
+   "sha256": "7b6ba2612f176464c0e2d80019b51a561f9caa370b56362200822129031886b8"
+  },
+  {
+   "path": "docs/handoff/DESIGN.md",
+   "bytes": 14983,
+   "sha256": "eb937bbd1fc536256c29e7d789a933431775ab83033fd10790422c017cce65bf"
+  },
+  {
+   "path": "docs/handoff/HANDOFF.md",
+   "bytes": 12085,
+   "sha256": "dbbfb5af8ff3b8c635d67d9c19d893dd4072d294c0b6c6161514ff0e63fd005d"
+  },
+  {
+   "path": "docs/handoff/PROGRESS.md",
+   "bytes": 2484,
+   "sha256": "fb935ecb8e7b3683b953b12dbb1644e164c6f198160e1f57e2a930a962828ddf"
+  },
+  {
+   "path": "ops/requests/connection-check.txt",
+   "bytes": 276,
+   "sha256": "623488c8b34ce1fcdf9202aa01e38014645be6f555723ae1f791935f2acde08f"
+  },
+  {
+   "path": "ops/requests/dropbox-auth.txt",
+   "bytes": 285,
+   "sha256": "fe392d07ab88c2b177128ec53744f7b76968f417ab8083b26786affdb8ae599d"
+  },
+  {
+   "path": "ops/requests/reading.txt",
+   "bytes": 644,
+   "sha256": "f0177aa3c5dc54e1677c28099caacdb4f8514e5058f2a18519b55d728337f8b0"
+  },
+  {
+   "path": "pyproject.toml",
+   "bytes": 882,
+   "sha256": "70a2e9e1baf5a3bde055edea84e5a84748eabd769b0b51b2d015de0068fe5b56"
+  },
+  {
+   "path": "requirements/process.yaml",
+   "bytes": 39014,
+   "sha256": "03720b927aa71160ca4b1af2b1cce0e3a9c42e60dd33edd5ca0e9aa0b686b4e4"
+  },
+  {
+   "path": "requirements-optional.txt",
+   "bytes": 599,
+   "sha256": "b873ef609741e81eb1eb48e9adc2e8181bfb70254f832ed67eab23de875780a9"
+  },
+  {
+   "path": "requirements.txt",
+   "bytes": 606,
+   "sha256": "e36465531256e00b8f5f9aac768fe20cdebfde9ebc2a6718fa52fd0285e8b4d3"
+  },
+  {
+   "path": "scripts/actions_usage.py",
+   "bytes": 3016,
+   "sha256": "45ec4d505aa5632d1fdcac86a06fac226bf5fab3a1ef82c169aa8f1bb6d84743"
+  },
+  {
+   "path": "scripts/run_analysis.sh",
+   "bytes": 1989,
+   "sha256": "290784f4d033ebabc4191a931ce256c56e597a7b079e2e11c9444041b6d3beef"
+  },
+  {
+   "path": "scripts/snapshot.py",
+   "bytes": 18461,
+   "sha256": "5421fab183c50b41d9b34054b96bfe6a29f765400eba8ae98b68f873a6c694a5"
+  },
+  {
+   "path": "src/structlab/__init__.py",
+   "bytes": 104,
+   "sha256": "7385819a2bf9d0cca13a8700ef4df721fcb25c1d0b051480742d9279001c6959"
+  },
+  {
+   "path": "src/structlab/__main__.py",
+   "bytes": 52,
+   "sha256": "13a1a5b340cdcfc1902b62be90e508c7c71886000d5bf087e7854aadf09fb35e"
+  },
+  {
+   "path": "src/structlab/ai/__init__.py",
+   "bytes": 5017,
+   "sha256": "4a5e567b9cd68646235cbe33a3fdcf3dde70b533806d937f75ccb65dad2f5c33"
+  },
+  {
+   "path": "src/structlab/ai/anthropic_provider.py",
+   "bytes": 17038,
+   "sha256": "aa689ddb3383d2a4e213e4e35de45fde6126a262b5cd31e9b3884934d98e6468"
+  },
+  {
+   "path": "src/structlab/ai/base.py",
+   "bytes": 2905,
+   "sha256": "6d479dafa72072401f091a15b4df3891684e08742aaaa188d33a58609956e91d"
+  },
+  {
+   "path": "src/structlab/ai/mock_provider.py",
+   "bytes": 2777,
+   "sha256": "19cd33f4f6a5461381c17f048915c1473d18f5c82f55a8a10be172f18da0771a"
+  },
+  {
+   "path": "src/structlab/ai/mock_semantic.py",
+   "bytes": 14389,
+   "sha256": "11c5f10c582126ae99adc616c3c03bbef39f8d0c4c832fcf38563731f4b7f2fc"
+  },
+  {
+   "path": "src/structlab/ai/prompts.py",
+   "bytes": 5516,
+   "sha256": "86513a71459aa887f46a6df930f0fdd9bed2066a4a09541b778e306793037307"
+  },
+  {
+   "path": "src/structlab/ai/tokens.py",
+   "bytes": 1207,
+   "sha256": "210340d66da849d1213d5754646b7258616380ebd73e740683707c806505bd7a"
+  },
+  {
+   "path": "src/structlab/checks/__init__.py",
+   "bytes": 225,
+   "sha256": "38ee81f4d8fe82494e8774a0f5cba7b4abeb2d61d3b61789ad553351286763cd"
+  },
+  {
+   "path": "src/structlab/checks/acquisition.py",
+   "bytes": 4237,
+   "sha256": "3bf145747c59aaf0e57e33235404b747ae8112c49a4afc0b3f0cde8efd097fce"
+  },
+  {
+   "path": "src/structlab/checks/base.py",
+   "bytes": 3290,
+   "sha256": "b744e1b4d85fa0208673788328965a4090de52a53efcf2fd04c7b16413265a4a"
+  },
+  {
+   "path": "src/structlab/checks/catalog.py",
+   "bytes": 17786,
+   "sha256": "49e63a3c34a9e56f09f6a7eaa19d6ad998cb5943409a71838cdd7c70d72c9331"
+  },
+  {
+   "path": "src/structlab/checks/deliverable.py",
+   "bytes": 11057,
+   "sha256": "59f4edff86d91a64bdcb0daca3769982191f50f94998f06405a20003b1008d6a"
+  },
+  {
+   "path": "src/structlab/checks/extraction.py",
+   "bytes": 19795,
+   "sha256": "6c952d0ee51c549df74b5b805bfc320497f66e25ad4ea8e77cf8faa43b522541"
+  },
+  {
+   "path": "src/structlab/checks/formula.py",
+   "bytes": 11600,
+   "sha256": "4617fc086536386e779e4f4cc683267640a54bf51b3d6b5d9530911ad25b3b45"
+  },
+  {
+   "path": "src/structlab/checks/integration.py",
+   "bytes": 10118,
+   "sha256": "f253f6e05567a40aae84e1415298b623ab1e8a2d16e70ec7e53140e33881cb78"
+  },
+  {
+   "path": "src/structlab/checks/operations.py",
+   "bytes": 6080,
+   "sha256": "46aa367ac58b7f5a481110fd41a7f7c6df716ec2657317f9adf6bf166e2ac2e4"
+  },
+  {
+   "path": "src/structlab/checks/report.py",
+   "bytes": 5622,
+   "sha256": "8bc6a41e741416e7aef815d3792587dfaf54e1039000e6dc39aecdea2ac97822"
+  },
+  {
+   "path": "src/structlab/checks/reverify.py",
+   "bytes": 11137,
+   "sha256": "b718d1d504f200c753cd791f31598ab2af2298ca00eea51f3e47bb574c9425ba"
+  },
+  {
+   "path": "src/structlab/checks/semantic_checks.py",
+   "bytes": 17758,
+   "sha256": "bd75b0831cd2b67945c9583bb9a5fcd44217c5bbdabc68bd63824673c2618120"
+  },
+  {
+   "path": "src/structlab/classify.py",
+   "bytes": 5725,
+   "sha256": "fee88ed40b46247cbe4654f1144afe47caafafcf53e806bb7bc77f8785543cca"
+  },
+  {
+   "path": "src/structlab/cli.py",
+   "bytes": 41695,
+   "sha256": "9efb138cf983e00ae7d4581607668335ef224eb0a37c773696fa0d2cdbd699f7"
+  },
+  {
+   "path": "src/structlab/config.py",
+   "bytes": 10239,
+   "sha256": "b33c0dc5c6de0316ab5efd6310c5b529993aca9accbd00a5d3afe209e71f63d0"
+  },
+  {
+   "path": "src/structlab/connect.py",
+   "bytes": 20141,
+   "sha256": "1c694ad1d12e0dbbf62dcf019b9e87c0b31d8066d13362d1289c26cf9e05c555"
+  },
+  {
+   "path": "src/structlab/costmodel.py",
+   "bytes": 14015,
+   "sha256": "4bc71b7774112e13398a9b691a61567b3a404ed47c0f854950fe321bafc5b96b"
+  },
+  {
+   "path": "src/structlab/db.py",
+   "bytes": 14887,
+   "sha256": "11a631fe457b75a473c67e6e2511ef45f7cad2bc502ead5f659ac1bc586e25df"
+  },
+  {
+   "path": "src/structlab/media.py",
+   "bytes": 22676,
+   "sha256": "d9e1d024fa46fa85ac5605dc0627e084724e22fed3674f126cee29e4fac601cb"
+  },
+  {
+   "path": "src/structlab/models.py",
+   "bytes": 3813,
+   "sha256": "c1e4ad3ced902f2e2f2e5d3df7a1c317cb9a42fc81cae743e8b08ed6c6e5dd2d"
+  },
+  {
+   "path": "src/structlab/pilot.py",
+   "bytes": 13819,
+   "sha256": "7c3600a6c5259f9069ff1d4fd71531d2af8ece87f8b4443a3dea76c1af51543f"
+  },
+  {
+   "path": "src/structlab/pipeline.py",
+   "bytes": 35018,
+   "sha256": "3cec1a75187bec7dc09d94306d13a2c5c21301220388e750148e647c4d5d17ac"
+  },
+  {
+   "path": "src/structlab/processors/__init__.py",
+   "bytes": 922,
+   "sha256": "64a24088a5effe6874b2e85cf2953480c816ad7539337ec6cc713bb50f61a5bf"
+  },
+  {
+   "path": "src/structlab/processors/base.py",
+   "bytes": 2242,
+   "sha256": "13566b50a0c342d109a05a26f9bc22cab6b3c9bd3963d420f559dfac6a2847cd"
+  },
+  {
+   "path": "src/structlab/processors/excel.py",
+   "bytes": 11037,
+   "sha256": "488fd52d9340d777e915b462109e5e43043c0c8abcf9774324d581c30a9f48da"
+  },
+  {
+   "path": "src/structlab/processors/image.py",
+   "bytes": 2121,
+   "sha256": "b89b3d4f381d7c1c2c63e3d5edb708639dc5d89f2e96053cc68b99ee3645dd0f"
+  },
+  {
+   "path": "src/structlab/processors/pdf.py",
+   "bytes": 4702,
+   "sha256": "8e7b05539080cc8ace2cf8a9f66c2fc99fddee7490aa7049ee0ce11fb22f017b"
+  },
+  {
+   "path": "src/structlab/processors/text.py",
+   "bytes": 5328,
+   "sha256": "25692e8dca6018b23542fd9e07cf5fc645f73d553cfe2f1c9eaef98a6edc68e3"
+  },
+  {
+   "path": "src/structlab/processors/video.py",
+   "bytes": 10287,
+   "sha256": "341f7b7b6e3197f0f93dff7e350a1457726837131028ec09f7af5291788c6698"
+  },
+  {
+   "path": "src/structlab/reading/__init__.py",
+   "bytes": 0,
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+   "path": "src/structlab/reading/ai_read.py",
+   "bytes": 39531,
+   "sha256": "e1328220a1ed610fc3537e310a24b8473052f75b7f7f86b4ce8be45ec4fc3c62"
+  },
+  {
+   "path": "src/structlab/reading/corpus.py",
+   "bytes": 20269,
+   "sha256": "cdcb1525bd55a3fdfe5fbbdef9703bd9f847abd29428074571aa8276b43103fb"
+  },
+  {
+   "path": "src/structlab/reading/detail.py",
+   "bytes": 6640,
+   "sha256": "e2495afeb125012c02761df555ab5a999a4829ecdaaa9488a88cc7fd4cc8676f"
+  },
+  {
+   "path": "src/structlab/reading/inventory.py",
+   "bytes": 5289,
+   "sha256": "3fe42b9562ba1358f79024c76a44f608aef79de95aa53327bcb2c980dcc4d0ab"
+  },
+  {
+   "path": "src/structlab/reading/merge.py",
+   "bytes": 5645,
+   "sha256": "d8204ba91eb740a83a3e1046d82af1bad2b827e78f75a813465a9c5cd58243a1"
+  },
+  {
+   "path": "src/structlab/reading/pdf_read.py",
+   "bytes": 5807,
+   "sha256": "fdf2ba23f0d8ef741b04e7d2a05190be5bdb744ab83a578cbcede1cecdc111f1"
+  },
+  {
+   "path": "src/structlab/reading/report.py",
+   "bytes": 13270,
+   "sha256": "2cf91eea9a7aa026153b3db7d664a2ceb42e2f3929bea58be47f94c9fb41bbd6"
+  },
+  {
+   "path": "src/structlab/reading/runner.py",
+   "bytes": 33637,
+   "sha256": "e28f52edd0603cb7ebe0fd2144fd1a2de13877a74f1953a6caa9a87b8b174b6f"
+  },
+  {
+   "path": "src/structlab/reading/semantic_bridge.py",
+   "bytes": 18636,
+   "sha256": "458591ac08a7078e8317059476457aafe807fe29b8fc7e9f79fd7a2e4db1956f"
+  },
+  {
+   "path": "src/structlab/reading/verify.py",
+   "bytes": 8892,
+   "sha256": "c1ac9c97fd87f2571577af1af89e1870a9ca161253d848829528f3c2437b8c69"
+  },
+  {
+   "path": "src/structlab/reading/video_read.py",
+   "bytes": 31451,
+   "sha256": "844dfd2b47412a824f1efc1877954a4052ae9383344dc6f833bbcf9580bd380b"
+  },
+  {
+   "path": "src/structlab/report.py",
+   "bytes": 19118,
+   "sha256": "8f4000eb05ee3e7d026c4136d0c381e0674b927f33643d977f4ecfccc78c5580"
+  },
+  {
+   "path": "src/structlab/requirements.py",
+   "bytes": 27427,
+   "sha256": "becad64df540df9e23004d7aea706ffc28783a5235e1ce1af33964b8b78d5a28"
+  },
+  {
+   "path": "src/structlab/safety.py",
+   "bytes": 6836,
+   "sha256": "897375dda3a24559a8de2a35fdd61900bcf75f8ecd3d6e39ddb6a7ee74922b29"
+  },
+  {
+   "path": "src/structlab/scanner.py",
+   "bytes": 5466,
+   "sha256": "e28341c41672ee6fe7858caf40bf241a37e1c3485000daa45d7378c684de9f67"
+  },
+  {
+   "path": "src/structlab/semantic/__init__.py",
+   "bytes": 304,
+   "sha256": "03e744192b6a9ee697e054c8d5ab724ace8d1c83816fa2bb369fcd06e3d7aad7"
+  },
+  {
+   "path": "src/structlab/semantic/corpus.py",
+   "bytes": 7086,
+   "sha256": "97cc67e7c7d44262821016e64eb0d9a35ded9d7427d67d603b6c5e317d2d3003"
+  },
+  {
+   "path": "src/structlab/semantic/engine.py",
+   "bytes": 62695,
+   "sha256": "0dca95ba9ce17efa42eea7aabb5a60bf327cf891673e6505c4298883bda314e0"
+  },
+  {
+   "path": "src/structlab/semantic/estimate.py",
+   "bytes": 7183,
+   "sha256": "ff9a34a7ef1d9e6b0bae7964a8d4a130a673323149bed1d2fbbec5b4b0d1ac98"
+  },
+  {
+   "path": "src/structlab/semantic/material.py",
+   "bytes": 6137,
+   "sha256": "850c030645c543b39b67fbdd72f47c850e0dda6c447d75cc978a9ef6649d67fa"
+  },
+  {
+   "path": "src/structlab/semantic/prompts.py",
+   "bytes": 17262,
+   "sha256": "76e401f5a3df0a371390f0d1e35cfc50c3a79d8eabc66d80b90e4ad817c8c013"
+  },
+  {
+   "path": "src/structlab/semantic/relations.py",
+   "bytes": 10073,
+   "sha256": "4518c0f9dc57aa630261fc1ddffa3f35a3f345d1671fc054afcf884b1d0a5c97"
+  },
+  {
+   "path": "src/structlab/semantic/report.py",
+   "bytes": 35400,
+   "sha256": "562f978f6f60acf836abe62d400c474279d9e4733a64c6807c3a9ec256c69919"
+  },
+  {
+   "path": "src/structlab/semantic/rules.py",
+   "bytes": 11371,
+   "sha256": "9af6881f5babc5c96c0e4e6896fffee5205b3b37d131a53d12032e4bee3937e1"
+  },
+  {
+   "path": "src/structlab/sources/__init__.py",
+   "bytes": 413,
+   "sha256": "11805aee040f8b044be564d84fa0a2e5050fe67fee833ffafe617857f4d52b84"
+  },
+  {
+   "path": "src/structlab/sources/base.py",
+   "bytes": 1153,
+   "sha256": "71a2ca75ac2955d235ad6b3837be00878bac5b35100b739f00d832bb06da56bf"
+  },
+  {
+   "path": "src/structlab/sources/dropbox_source.py",
+   "bytes": 11166,
+   "sha256": "464e3235d0a27a17aa0e2b0756b9055fa3ef7b63d76fb93c71d539cfc7169616"
+  },
+  {
+   "path": "src/structlab/sources/local.py",
+   "bytes": 2272,
+   "sha256": "373233f201cd91f6f9ef3ec867931e84feddb702acf0cb5841c604c4e3645a33"
+  },
+  {
+   "path": "src/structlab/style/__init__.py",
+   "bytes": 61,
+   "sha256": "51a5e8d46195ca027fe8bb5a1dcd05a161aa21c2cd9ab08ad9aaf8590e2b38fb"
+  },
+  {
+   "path": "src/structlab/style/apply.py",
+   "bytes": 12322,
+   "sha256": "df22c25cf5eb35281904a60e28bbaa29b2b58383b9fde4f01d71454268dfd22d"
+  },
+  {
+   "path": "src/structlab/style/profile.py",
+   "bytes": 7786,
+   "sha256": "4a54344884e05da500dec0f6c41a9d7e37831f761ff2066c959838283b1f4e70"
+  },
+  {
+   "path": "src/structlab/token_store.py",
+   "bytes": 10901,
+   "sha256": "be122a27288cdfb8ada038626dbd9800d7a936ece6f344717ac83e6e5aacee1d"
+  },
+  {
+   "path": "src/structlab/trace.py",
+   "bytes": 6007,
+   "sha256": "13417b041dbff527cda18105e2f5bb6072d473549fe31f1e0ee8bc3c9ff086a8"
+  },
+  {
+   "path": "tests/conftest.py",
+   "bytes": 2681,
+   "sha256": "f3013d7fa1d7932cb5f77d53dfedb8877a882c4daba80424f05f4a3183c969ba"
+  },
+  {
+   "path": "tests/dummy_data.py",
+   "bytes": 8323,
+   "sha256": "d48f1b4d929f7e44b2f654bf048b3effd51973d3b0ad29916342d9c376b8543f"
+  },
+  {
+   "path": "tests/test_check_catalog.py",
+   "bytes": 7570,
+   "sha256": "e0801fd277b4b3d77482323a53b2b25051d949346fb0ed0df24a33364c246092"
+  },
+  {
+   "path": "tests/test_checks.py",
+   "bytes": 15344,
+   "sha256": "bb830a9fd6b5b82f1fb3007b84371ee79fbdadacc8e1934d67a0149989fb95d1"
+  },
+  {
+   "path": "tests/test_cli_and_sync.py",
+   "bytes": 4893,
+   "sha256": "4a2f5713cf9972c0c5a96c702089f32246df2cf45bcbe5994783de6003576da9"
+  },
+  {
+   "path": "tests/test_config_and_integrations.py",
+   "bytes": 9531,
+   "sha256": "28aa84b655906686e500715b842f61bfa4ed5b93c54e43901f5eaa0cc50b8077"
+  },
+  {
+   "path": "tests/test_connect.py",
+   "bytes": 19841,
+   "sha256": "07c6d7c859bcba44cac2cedbe4cf0e7fcccffefdca9e62e3393579a3bbad52f7"
+  },
+  {
+   "path": "tests/test_costmodel.py",
+   "bytes": 3226,
+   "sha256": "0ec672d4ae294f4f3d6cdfddc5ddf358b44c598381be865199041f280d7e07e2"
+  },
+  {
+   "path": "tests/test_formats.py",
+   "bytes": 5184,
+   "sha256": "26fcbb74a51fae49cb8f89fb4e51773b9de0b50a1e75fda19742afd0bab1a0fc"
+  },
+  {
+   "path": "tests/test_large_files.py",
+   "bytes": 5408,
+   "sha256": "0fdea4b3ba0169e5e5c80a82f1cc9c0d74c32d7c3071a8683a57adec1ec4a598"
+  },
+  {
+   "path": "tests/test_pilot.py",
+   "bytes": 9113,
+   "sha256": "288890e43752301dbb58d00f05c4ae12c683aa2dc0207dc75164688d6bf4151b"
+  },
+  {
+   "path": "tests/test_provenance_and_report.py",
+   "bytes": 5289,
+   "sha256": "9383fda3a77fbf2c7f94b25e2c6ff099db4f10bc4e6b8d908fa058918028a9f2"
+  },
+  {
+   "path": "tests/test_reading.py",
+   "bytes": 51698,
+   "sha256": "805f5be7501f7ba693fc660f584a371c63d7c9f6bb063108641592d744d630c2"
+  },
+  {
+   "path": "tests/test_recovery.py",
+   "bytes": 5004,
+   "sha256": "91eaebcaeae3d4dd217ba5ef26c0c3dc703877716191749570b7ad39c3431ea5"
+  },
+  {
+   "path": "tests/test_requirements.py",
+   "bytes": 3491,
+   "sha256": "4ea46377c2812030a746a361f49dc7ecbcb4b602f3a13c7889e35fadc81adb9e"
+  },
+  {
+   "path": "tests/test_resume_and_detection.py",
+   "bytes": 7489,
+   "sha256": "2645be3c4a0567225a21eeff3a1d8fe8e391136c254c149945954c5796d76352"
+  },
+  {
+   "path": "tests/test_safety.py",
+   "bytes": 3895,
+   "sha256": "d6b07d83fd3cfc78357804a4257ca7da04cba477cdbf518c3d2ffa512131653a"
+  },
+  {
+   "path": "tests/test_semantic.py",
+   "bytes": 27348,
+   "sha256": "d929ac2e0cd7f4950d2cdb1fea3c02859656ade3c719c5a2ea0386b1df614041"
+  },
+  {
+   "path": "tests/test_style_feedback.py",
+   "bytes": 11511,
+   "sha256": "7b70ad211a1be145c725cc2eb5945a8ea376ba2af8f92095d0e2497c553ed44d"
+  },
+  {
+   "path": "tests/test_video.py",
+   "bytes": 6235,
+   "sha256": "1e9c5efb20f0ee9b35dd8b3f316cba7710e45489324cbf1e487a606ec251887e"
+  }
+ ]
+}
