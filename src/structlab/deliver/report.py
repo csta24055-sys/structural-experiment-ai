@@ -308,7 +308,7 @@ def build(inp: Inputs, content: dict, outdir: Path, *, pdf: bool = True) -> dict
         tbl.autofit = False
         ncol = len(t["head"])
         w0 = 62 if ncol <= 5 else 40
-        widths = [w0] + [(160 - w0) / (ncol - 1)] * (ncol - 1) if ncol > 1 else [160]
+        widths = t.get("widths") or ([w0] + [(160 - w0) / (ncol - 1)] * (ncol - 1) if ncol > 1 else [160])
         for row in tbl.rows:
             for cell, w in zip(row.cells, widths):
                 cell.width = Mm(w)
@@ -327,7 +327,7 @@ def build(inp: Inputs, content: dict, outdir: Path, *, pdf: bool = True) -> dict
                 cell = tbl.rows[r].cells[i]
                 cell.text = str(v)
                 for par in cell.paragraphs:
-                    if i > 0:
+                    if i > 0 and not t.get("align_left"):
                         par.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     for run in par.runs:
                         run.font.size = Pt(9)
