@@ -173,9 +173,9 @@ def next_ids(work: Path, n: int) -> list[str]:
             continue  # 別の答え役が答えている途中
         if (P["queue"] / "inbox" / f"{rid}.json").exists():
             continue  # 答えは届いていて、取り込み待ち
-        from structlab.ai.queue_provider import record_digest, render_markdown
+        from structlab.ai.queue_provider import digest_ok, render_markdown
         rec = q.request(rid)
-        if record_digest(rec) != rec.get("record_sha256"):
+        if not digest_ok(rec, rec.get("record_sha256")):
             continue  # 書き換えられた依頼は渡さない（step で作り直す）
         (P["queue"] / "requests" / f"{rid}.md").write_text(render_markdown(rec), encoding="utf-8")  # 読む文面を依頼と一致させる
         mark.touch()

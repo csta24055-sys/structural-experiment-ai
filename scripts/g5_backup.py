@@ -127,6 +127,24 @@ def remote(spec: str | None):
 
 
 # ---------------- 保存 ----------------
+def _portable_answer(work: Path, rel: str, b: bytes) -> bytes:
+    """M27 までの答えは指紋に作業フォルダの絶対パスを含む。手元の依頼で確かめられたものだけ、場所に依らない指紋に直して保存する
+    （手元のファイルは変えない）。"""
+    if not rel.startswith("queue/answers/"):
+        return b
+    from structlab.ai.queue_provider import record_digest
+    rp = work / "queue" / "requests" / Path(rel).name
+    try:
+        a, rec = json.loads(b), json.loads(rp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return b
+    new = record_digest(rec)
+    if a.get("record_sha256") == record_digest(rec, legacy=True) != new and rec.get("id") == Path(rel).stem:
+        a["record_sha256"] = new
+        return json.dumps(a, ensure_ascii=False).encode()
+    return b
+
+
 def push(work: Path, rem) -> dict:
     idx = load_index(work)
     changed = {}
@@ -137,9 +155,10 @@ def push(work: Path, rem) -> dict:
             changed[rel] = (b, h)
     if not changed:
         return {"bundled": 0, "bundle": None}
+    changed = {rel: (_portable_answer(work, rel, b), h) for rel, (b, h) in changed.items()}
     seq = max([int(NAME.match(n).group(1)) for n in rem.names()] + [len(idx["bundles"])]) + 1
     manifest = {"seq": seq, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "files": {rel: h for rel, (_, h) in changed.items()}}
+                "files": {rel: sha(b) for rel, (b, _) in changed.items()}}
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:xz") as tf:
         for rel, (b, _) in [("manifest.json", (json.dumps(manifest, ensure_ascii=False).encode(), ""))] + sorted(changed.items()):
@@ -149,7 +168,7 @@ def push(work: Path, rem) -> dict:
     data = buf.getvalue()
     name = f"g5-{seq:05d}-{sha(data)[:12]}.tar.xz"
     rem.put(name, data)
-    idx["files"].update(manifest["files"])
+    idx["files"].update({rel: h for rel, (_, h) in changed.items()})   # 手元のファイルの sha256（変化の検出用）
     idx["bundles"].append(name)
     save_index(work, idx)
     return {"bundled": len(changed), "bundle": name, "bytes": len(data)}
@@ -173,6 +192,16 @@ def _open(name: str, data: bytes) -> tuple[dict, dict[str, bytes]]:
     return manifest, files
 
 
+def _same_answer(x: bytes, y: bytes) -> bool:
+    """指紋の形（M27 まで・M28 から）だけが違う同じ答え。"""
+    try:
+        a, b = json.loads(x), json.loads(y)
+    except ValueError:
+        return False
+    return isinstance(a, dict) and isinstance(b, dict) and {k: v for k, v in a.items() if k != "record_sha256"} == \
+        {k: v for k, v in b.items() if k != "record_sha256"}
+
+
 def restore(work: Path, rem) -> dict:
     work.mkdir(parents=True, exist_ok=True)
     pre = set(targets(work))                      # 戻す前からあったファイル（上書きしない）
@@ -189,7 +218,7 @@ def restore(work: Path, rem) -> dict:
         for rel, b in files.items():
             dest = work / rel
             if rel in pre:
-                if sha(dest.read_bytes()) == manifest["files"][rel]:
+                if sha(dest.read_bytes()) == manifest["files"][rel] or _same_answer(dest.read_bytes(), b):
                     res["same"] += 1
                 else:
                     res["conflicts"].append(rel)  # 手元の版を残す（上書きしない）

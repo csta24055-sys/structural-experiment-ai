@@ -127,3 +127,32 @@ def test_driver_step_backs_up_when_configured(tmp_path, monkeypatch):
     monkeypatch.setenv("G5_BACKUP", "dropbox")
     r = g5.backup_now(work)                                                             # 認証情報が無い等の失敗は記録（値は出さない）
     assert r["enabled"] and ("error" in r or "bundled" in r)
+
+
+def test_restore_into_a_different_folder_uses_the_answers(tmp_path):
+    """作業フォルダの場所が変わっても（新しい環境）、戻した答えが使われる。M27 までの指紋（絶対パス入り）の答えも保存時に直す。"""
+    from PIL import Image
+    from structlab.ai.base import AIImage
+    from structlab.ai.queue_provider import record_digest
+
+    def reqs(base):
+        img = base / "files" / "doc" / "p.png"
+        img.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (30, 20), "white").save(img)
+        return [AIRequest(task="t", source_label="s", text="本文", system="指示", schema=SCHEMA,
+                          images=[AIImage(img, "画面", lossless=True)])]
+    a, b, rem = tmp_path / "a" / "g5", tmp_path / "b" / "g5", B.DirRemote(tmp_path / "remote")
+    QueueProvider(a / "queue").analyze_batch(reqs(a), log=lambda m: None)
+    _answer_all(a)
+    ans = next((a / "queue" / "answers").glob("*.json"))
+    rec = json.loads((a / "queue" / "requests" / ans.name).read_text(encoding="utf-8"))
+    old = json.loads(ans.read_text(encoding="utf-8"))
+    old["record_sha256"] = record_digest(rec, legacy=True)            # M27 までの形の答え
+    ans.write_text(json.dumps(old), encoding="utf-8")
+    assert QueueProvider(a / "queue").analyze_batch(reqs(a), log=lambda m: None)[0].data == {"ok": 1}
+    B.push(a, rem)
+    res = B.restore(b, rem)
+    assert res["restored"] == 1 and not res["conflicts"]
+    out = QueueProvider(b / "queue").analyze_batch(reqs(b), log=lambda m: None)   # 別の場所で依頼を作り直す
+    assert out[0].data == {"ok": 1} and not Queue(b / "queue").pending()
+    assert B.restore(a, rem)["conflicts"] == []                                    # 元の場所に戻しても衝突にしない

@@ -126,10 +126,28 @@ def request_record(req: AIRequest, images_dir: Path | None = None, max_edge: int
     return rec
 
 
-def record_digest(rec: dict) -> str:
+def _portable(p: str) -> str:
+    """作業フォルダの場所に依らない画像の名前（queue/… または files/… 以降）。画像の中身は依頼の番号（id）に含まれる。"""
+    for mark in ("/queue/", "/files/"):
+        if mark in p:
+            return mark.strip("/") + "/" + p.split(mark, 1)[1]
+    return Path(p).name
+
+
+def record_digest(rec: dict, legacy: bool = False) -> str:
+    """依頼の指紋。M28 から作業フォルダの場所を含めない（別の場所に復元した答えも使える）。legacy は M27 までの形（絶対パス）。"""
     keep = {k: rec[k] for k in ("version", "id", "task", "source_label", "system", "text", "schema")}
     keep["images"] = [{k: i.get(k) for k in ("label", "path", "width", "height", "tiles")} for i in rec["images"]]
+    if not legacy:
+        for i in keep["images"]:
+            i["path"] = _portable(i["path"]) if i.get("path") else i.get("path")
+            i["tiles"] = [_portable(t) for t in i["tiles"]] if i.get("tiles") else i.get("tiles")
     return hashlib.sha256(json.dumps(keep, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def digest_ok(rec: dict, d: str | None) -> bool:
+    """d がこの依頼の指紋か（M28 の形・M27 までの形のどちらでもよい。どちらも中身から計算し直して比べる）。"""
+    return d is not None and d in (record_digest(rec), record_digest(rec, legacy=True))
 
 
 END_MARK = "<<依頼の終わり>>"
@@ -188,7 +206,7 @@ class Queue:
             ap.unlink()
             return None
         # 依頼のファイルが書き換えられていないか（中身から指紋を計算し直す）と、答えがその依頼のものかを確かめる
-        if record_digest(rec) != rec.get("record_sha256") or a.get("record_sha256") != rec["record_sha256"] \
+        if not digest_ok(rec, rec.get("record_sha256")) or not digest_ok(rec, a.get("record_sha256")) \
                 or validate(a.get("data"), rec["schema"]):
             self._reject(rec["id"], json.dumps(a, ensure_ascii=False), ["依頼が変わった・形に合わない（answers）"])
             ap.unlink()
@@ -233,7 +251,7 @@ class Queue:
                 out["rejected"] += 1
                 p.unlink()
                 continue
-            if record_digest(rec) != rec.get("record_sha256"):
+            if not digest_ok(rec, rec.get("record_sha256")):
                 self._reject(rid, raw, ["依頼のファイルが書き換えられている（作り直しが必要）"])
                 out["rejected"] += 1
                 p.unlink()
