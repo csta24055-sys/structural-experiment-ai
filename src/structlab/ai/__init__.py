@@ -24,6 +24,12 @@ def make_provider(cfg, allow_external_flag: bool = False) -> tuple[AIProvider | 
         from .anthropic_provider import AnthropicProvider
         return AnthropicProvider(model=ai["model"], effort=ai["effort"], max_tokens=ai["max_output_tokens"],
                                  use_fallbacks=ai["use_fallbacks"], max_image_edge=ai["max_image_edge"]), "ok"
+    if p == "claude_code_queue":  # 候補 G5（既定では使わない）: Claude Code（定額の契約）で解析する受け渡し口
+        if not (ai.get("allow_external") or allow_external_flag):
+            return None, "外部AIへの送信が許可されていません（Claude Code も Anthropic に送るので許可が必要）"
+        from pathlib import Path
+        from .queue_provider import QueueProvider
+        return QueueProvider(Path(ai.get("queue_dir") or "work/queue"), model_label=f"claude-code:{ai['model']}"), "ok"
     raise AIError(f"未知のプロバイダ: {p}", retryable=False)
 
 

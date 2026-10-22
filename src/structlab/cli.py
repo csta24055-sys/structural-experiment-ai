@@ -692,6 +692,32 @@ def cmd_pilot(args) -> int:
     return 0
 
 
+def cmd_queue(args) -> int:
+    """候補 G5: Claude Code で解析する依頼の受け渡し（status / next / show / answer）。"""
+    from .ai import queue_provider as Q
+    d = Path(args.dir)
+    if args.action == "status":
+        req = list((d / "requests").glob("*.json"))
+        print(f"依頼 {len(req)} 件、回答済み {len(req) - len(Q.pending(d))} 件、未回答 {len(Q.pending(d))} 件")
+    elif args.action == "next":
+        for p in Q.pending(d)[:args.n]:
+            r = json.loads(p.read_text(encoding="utf-8"))
+            print(f"{r['id']}\t{r['task']}\t{r['source_label']}\t画像 {len(r['images'])} 枚")
+    elif args.action == "show":
+        r = json.loads((d / "requests" / f"{args.id}.json").read_text(encoding="utf-8"))
+        print(f"# 依頼 {r['id']}（{r['task']}・{r['source_label']}）\n## 指示（system）\n{r['system']}\n"
+              f"## 画像（この順に Read で開く。縮小しない）")
+        for i, im in enumerate(r["images"], 1):
+            print(f"{i}. {im['label']}: {im['path']}")
+        print(f"## 本文\n{r['text']}\n## 出力の形（JSON スキーマ。これに合う JSON だけを書く）\n"
+              f"{json.dumps(r['schema'], ensure_ascii=False)}")
+    elif args.action == "answer":
+        errs = Q.answer(d, args.id, Path(args.file), args.model)
+        print("保存しました" if not errs else "出力の形に合いません（保存していない）:\n" + "\n".join(errs))
+        return 1 if errs else 0
+    return 0
+
+
 def cmd_connect_check(args) -> int:
     cfg = load_config(args.config)
     from .connect import run_connect_check
@@ -795,6 +821,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tolerance", type=float, default=0.02)
     p.add_argument("--out", default="work/pilot")
     p.add_argument("--semantic-db", help="plan: 見本の比較にかかる費用を計算する意味理解の DB（semantic.db）")
+    p = sub.add_parser("queue", help="（候補 G5）Claude Code で解析する依頼の受け渡し")
+    p.add_argument("action", choices=["status", "next", "show", "answer"])
+    p.add_argument("id", nargs="?")
+    p.add_argument("file", nargs="?", help="answer: 答えの JSON ファイル")
+    p.add_argument("--dir", default="work/queue")
+    p.add_argument("-n", type=int, default=20)
+    p.add_argument("--model", default="claude-code:claude-opus-5-5", help="answer: 答えたモデル（記録用）")
     p = sub.add_parser("connect-check", help="Dropbox・Claude API の接続確認（読み取りのみ・課金なし）")
     p.add_argument("--no-download", action="store_true", help="動画・PDF・Excel の見本の取得を省略")
     p.add_argument("--no-claude", action="store_true")
@@ -809,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
                 "estimate": cmd_estimate, "search": cmd_search, "show-directive": cmd_show_directive,
                 "dropbox-auth": cmd_dropbox_auth, "connect-check": cmd_connect_check, "read": cmd_read,
                 "requirements": cmd_requirements, "pilot": cmd_pilot,
-                "cost": cmd_cost}[args.cmd](args)
+                "cost": cmd_cost, "queue": cmd_queue}[args.cmd](args)
     except ConfigError as e:
         print(f"設定エラー: {e}", file=sys.stderr)
         return 2

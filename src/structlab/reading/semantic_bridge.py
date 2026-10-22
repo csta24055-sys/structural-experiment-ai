@@ -254,6 +254,7 @@ class BatchGate:
 def run_semantic(cfg, out: Path, records: dict[str, dict], provider=None, *, batch: bool = True, log=print) -> dict:
     """意味理解（規則＋AI の3段階）と資料横断の統合を実行し、out/semantic/ に報告を書く。"""
     from ..ai import AIError
+    from ..ai.base import AwaitingAnswer
     from ..semantic.corpus import integrate
     from ..semantic.engine import SemanticEngine
     from ..semantic.report import write_semantic_reports
@@ -283,6 +284,8 @@ def run_semantic(cfg, out: Path, records: dict[str, dict], provider=None, *, bat
         def call(req, uid):
             try:
                 resp = gate.call(req) if gate else provider.analyze(req)
+            except AwaitingAnswer:
+                raise
             except AIError:
                 with ulock:
                     usage["failed"] += 1
@@ -313,7 +316,9 @@ def run_semantic(cfg, out: Path, records: dict[str, dict], provider=None, *, bat
             res = gate.call_many([req for req, _ in items])
             out = []
             for (req, uid), r in zip(items, res):
-                if isinstance(r, Exception):
+                if isinstance(r, AwaitingAnswer):
+                    out.append(r)
+                elif isinstance(r, Exception):
                     with ulock:
                         usage["failed"] += 1
                     out.append(r if isinstance(r, AIError) else AIError(f"{type(r).__name__}: {r}", retryable=True))

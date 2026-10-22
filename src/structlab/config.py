@@ -215,7 +215,7 @@ class Config:
                     "（元資料を読み取り専用に保つため）"
                 )
         ai = self.data["ai"]
-        if ai["provider"] not in ("none", "mock", "anthropic"):
+        if ai["provider"] not in ("none", "mock", "anthropic", "claude_code_queue"):
             raise ConfigError(f"ai.provider が不正です: {ai['provider']}")
         sp = (self.data.get("style", {}).get("dropbox_path") or "").rstrip("/").lower()
         if sp and st == "dropbox" and src and (sp + "/").startswith(src.lower() + "/"):

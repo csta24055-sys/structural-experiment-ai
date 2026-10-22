@@ -272,6 +272,7 @@ def check_auto(name: str, c: Ctx) -> tuple[str, str]:
         on = [k for k, v in (("semantic.cache_layout", bool(sem.get("cache_layout"))),
                              ("semantic.verify_group", int(sem.get("verify_group", 1)) > 1),
                              ("semantic.reinterpret_output", sem.get("reinterpret_output") == "delta"),
+                             ("ai.provider=claude_code_queue", c.cfg.data.get("ai", {}).get("provider") == "claude_code_queue"),
                              ("reading.roles[].event_scale", any(r.get("event_scale") is not None
                                                                  for r in c.cfg.data.get("reading", {}).get("roles", []) or [])),
                              ("reading.semantic_material", c.cfg.data.get("reading", {}).get("semantic_material") == "compact"))

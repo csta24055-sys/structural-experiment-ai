@@ -49,6 +49,10 @@ class AIResponse:
     raw_text: str = ""
 
 
+class AwaitingAnswer(Exception):
+    """答えがまだ無い（Claude Code の回答待ちなど）。失敗ではないので、状態を変えずにこの実行では先へ進まない（次回続きから）。"""
+
+
 class AIError(Exception):
     def __init__(self, message: str, retryable: bool = True):
         super().__init__(message)

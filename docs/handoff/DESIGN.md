@@ -1,4 +1,4 @@
-# 全体設計書（after-M25）
+# 全体設計書（after-M26）
 
 関数ごとの一覧は `MODULES.md`、利用者向けの詳しい説明は `source/docs/READING.md`・`source/docs/SEMANTIC.md`・
 `source/docs/CHECKS.md`・`source/docs/COSTS.md` にあります。この文書は「全体がどうつながっているか」と
@@ -134,6 +134,12 @@ summary（1 ジョブ）
 - 候補の設定: `semantic.cache_layout`（`prefix` / `prefix_verify` / `prefix_reinterpret`）、`semantic.verify_group`、
   `reading.semantic_material: compact`、`semantic.reinterpret_output: delta`（C5、変わった項目だけ返させて `apply_updates` で重ねる）、
   `reading.roles[].event_scale`（D1、細部の読み取りの変化した画面の全体の倍率）。AIRequest に `prefix_before_images`・`cache_ttl` を追加（候補のときだけ使う）
+
+## 7c. G5: Claude Code で解析する受け渡し口（M26、既定では無効）
+- `ai/queue_provider.py`（`ai.provider: claude_code_queue`）: 依頼を `queue/requests/<指紋>.json` に書き、答え（`answers/`）をスキーマで検査して使う。
+  答えが無ければ `AwaitingAnswer`（失敗ではない）で状態を変えずに止まる。エンジン・Batch の門・資料横断は `AwaitingAnswer` を予算の上限と同じに扱う
+- `scripts/queue_reading.py`: 無料の前処理の成果物から読み取りの依頼を出し、答えを reading.json に入れる。`structlab queue status|next|show|answer`
+- 答え方の決まり: docs/CLAUDE_CODE_QUEUE.md
 
 ## 8. 費用（`costmodel.py`・`pilot.py`、詳細は COSTS.md）
 - 読み取り: `ai_read.estimate_plan`（画像は公式の式 ⌈幅/28⌉×⌈高さ/28⌉、仮定の出力）、`count_tokens` で入力を実測（差は数 %）

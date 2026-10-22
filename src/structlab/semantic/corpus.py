@@ -9,6 +9,7 @@ import json
 import logging
 import time
 
+from ..ai.base import AwaitingAnswer
 from ..ai import AIError, AIRequest
 from ..db import DB
 from ..models import fmt_time
@@ -98,6 +99,8 @@ def integrate(engine) -> None:
             r = engine._ai(AIRequest(task="corpus_integration", source_label="資料横断", text=text,
                                      system=P.COMMON_SYSTEM, schema=P.CORPUS_SCHEMA), None)
             partials.append(r.data or {})
+    except AwaitingAnswer:
+        return  # 回答待ち: 次回続きから
     except AIError as e:
         db.log_error(run_id=engine.run_id, stage="semantic:corpus", message=str(e))
         log.error("資料横断の統合理解に失敗（次回再試行）: %s", e)

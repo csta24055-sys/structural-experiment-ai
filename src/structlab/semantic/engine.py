@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..ai import AIError, AIImage, AIRequest, items_from_response
+from ..ai.base import AwaitingAnswer
 from ..classify import verify_evidence
 from ..db import DB
 from ..models import fmt_time
@@ -109,8 +110,8 @@ class SemanticEngine:
         if self.ai_active:
             try:
                 self._run_ai(frow, scenes, local_path)
-            except BudgetExceeded as e:
-                self.ai_stopped = str(e)
+            except (BudgetExceeded, AwaitingAnswer) as e:
+                self.ai_stopped = str(e) if isinstance(e, BudgetExceeded) else None
                 log.warning("意味理解のAI解析を次回に持ち越します: %s", e)
             except AIError as e:
                 d = self._doc_row(frow, "ai")
@@ -191,7 +192,7 @@ class SemanticEngine:
                 out.append(self._ai(req, uid))
             except AIError as e:
                 out.append(e)
-            except BudgetExceeded as e:  # 上限: 残りは送らない（呼び出し側は得られた結果を保存してから止める）
+            except (BudgetExceeded, AwaitingAnswer) as e:  # 上限・回答待ち: 残りは送らない（得られた結果を保存してから止める）
                 out += [e] * (len(items) - len(out))
                 break
         return out
@@ -638,9 +639,9 @@ class SemanticEngine:
         # Batch の門がある場合: 場面ごとの依頼は互いの結果を使わない（材料は全体理解・場面の理解・元の発話・規則候補だけ）ので、
         # まとめて送り、結果は場面の順に保存する（1件ずつ送る場合と依頼も保存の順序も同じ）
         results = self._ai_many([(req, sc.unit_id) for sc, _, req in jobs]) if jobs else []
-        stop = next((r for r in results if isinstance(r, BudgetExceeded)), None)
+        stop = next((r for r in results if isinstance(r, (BudgetExceeded, AwaitingAnswer))), None)
         for (sc, cands, _), r in zip(jobs, results):
-            if not isinstance(r, BudgetExceeded):  # 送っていないものは次回に持ち越し
+            if not isinstance(r, (BudgetExceeded, AwaitingAnswer)):  # 送っていないものは次回に持ち越し
                 self._directive_result(did, frow, scenes, sc, cands, r)
         if stop is not None:
             raise stop
@@ -808,9 +809,9 @@ class SemanticEngine:
                 jobs.append(self._verify_request(did, frow, scenes, dir_id, issues, g, local_path))
             results = self._ai_many([(req, d["unit_id"]) for d, _, req in jobs]) if jobs else []
             for (d, issues, _), r in zip(jobs, results):
-                if not isinstance(r, BudgetExceeded):
+                if not isinstance(r, (BudgetExceeded, AwaitingAnswer)):
                     self._verify_apply(did, frow, scenes, d, issues, r)
-            stop = next((r for r in results if isinstance(r, BudgetExceeded)), None)
+            stop = next((r for r in results if isinstance(r, (BudgetExceeded, AwaitingAnswer))), None)
             if stop is not None:
                 raise stop
         # 場面ごとの照合状態（網羅率の計算用）
