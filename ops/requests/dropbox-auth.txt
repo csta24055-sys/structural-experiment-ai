@@ -1,4 +1,4 @@
 # このファイルを変更して push すると、GitHub Actions の「Dropbox auth」が動きます。
 # mode: preflight（本人認証の前の確認） / exchange（DROPBOX_AUTH_CODE を交換して DROPBOX_REFRESH_TOKEN に登録）
-mode: exchange
-request: 2026-10-20 exchange
+mode: preflight
+request: 2026-10-22 preflight with files.content.write (G5 backup)

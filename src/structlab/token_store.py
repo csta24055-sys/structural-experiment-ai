@@ -26,6 +26,9 @@ GITHUB_API = "https://api.github.com"
 SECRET_NAME = "DROPBOX_REFRESH_TOKEN"
 CODE_SECRET = "DROPBOX_AUTH_CODE"
 TEST_SECRET = "STRUCTLAB_SECRET_WRITE_TEST"
+AUTHORIZE_URL = "https://www.dropbox.com/oauth2/authorize"
+#: 許可で求める権限（G5 の保存のため書き込みを含む。2026-10-22 利用者の指示。書き込みは解析結果フォルダへの追加だけに使う）
+SCOPES = "files.metadata.read files.content.read files.content.write"
 
 
 class TokenError(Exception):
@@ -170,6 +173,21 @@ def cmd_preflight(http=None, out=print) -> bool:
         out(f"[{'OK ' if has else 'NG '}] Secret {n}: {'あり' if has else 'なし'}")
     if not ok:
         return False
+    if http is None:  # 許可ページが、求める権限（書き込みを含む）を受け付けるか（アプリの Permissions に無い権限は invalid_scope）
+        q = urllib.parse.urlencode({"client_id": _env("DROPBOX_APP_KEY"), "response_type": "code",
+                                    "token_access_type": "offline", "scope": SCOPES})
+        try:
+            with urllib.request.urlopen(f"{AUTHORIZE_URL}?{q}", timeout=30) as r:
+                st, body = r.status, r.read(200000).decode(errors="replace").lower()
+        except urllib.error.HTTPError as e:
+            st, body = e.code, e.read(200000).decode(errors="replace").lower()
+        bad = st >= 400 or "invalid_scope" in body or "invalid_client" in body
+        out(f"[{'NG ' if bad else 'OK '}] 許可ページ（{SCOPES}）: HTTP {st}"
+            + ("。App Console の Permissions で files.content.write にチェック → Submit が必要" if bad else "（Dropbox が受け付けた）"))
+        ok &= not bad
+        out("-- 許可ページの URL（最後に App key を付けて開く）: "
+            + AUTHORIZE_URL + "?response_type=code&token_access_type=offline&scope="
+            + urllib.parse.quote(SCOPES) + "&client_id=")
     try:
         w = _writer(http)
         w.public_key()
