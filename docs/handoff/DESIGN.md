@@ -1,4 +1,4 @@
-# 全体設計書（after-M26）
+# 全体設計書（after-M27）
 
 関数ごとの一覧は `MODULES.md`、利用者向けの詳しい説明は `source/docs/READING.md`・`source/docs/SEMANTIC.md`・
 `source/docs/CHECKS.md`・`source/docs/COSTS.md` にあります。この文書は「全体がどうつながっているか」と
@@ -139,7 +139,10 @@ summary（1 ジョブ）
 - `ai/queue_provider.py`（`ai.provider: claude_code_queue`）: 依頼を `queue/requests/<指紋>.json` に書き、答え（`answers/`）をスキーマで検査して使う。
   答えが無ければ `AwaitingAnswer`（失敗ではない）で状態を変えずに止まる。エンジン・Batch の門・資料横断は `AwaitingAnswer` を予算の上限と同じに扱う
 - `scripts/queue_reading.py`: 無料の前処理の成果物から読み取りの依頼を出し、答えを reading.json に入れる。`structlab queue status|next|show|answer`
-- 答え方の決まり: docs/CLAUDE_CODE_QUEUE.md
+- 答え方の決まり: docs/CLAUDE_CODE_QUEUE.md。答え役 `.claude/agents/g5-answerer.md`（Read と Write、モデル固定、effort high）
+- 依頼の記録（版 5）: API と同じ符号化をした画像の PNG、長辺 2000 超の部分画像、行に分けた Markdown（行数・終わりの印）、
+  API の依頼を作り直す情報（P-G5 用、`api_request`）。答えは `inbox` → 検査（`Queue.ingest`）→ `answers`（依頼の指紋つき）
+- 実行役 `scripts/g5_driver.py`（prepare / step / next / status / fake-answer）、P-G5 `scripts/pg5.py`（select / run-api / compare）
 
 ## 8. 費用（`costmodel.py`・`pilot.py`、詳細は COSTS.md）
 - 読み取り: `ai_read.estimate_plan`（画像は公式の式 ⌈幅/28⌉×⌈高さ/28⌉、仮定の出力）、`count_tokens` で入力を実測（差は数 %）

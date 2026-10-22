@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from ..ai.base import AIRequest
+from ..ai.base import AwaitingAnswer
 from ..models import fmt_time
 from .verify import norm, similarity
 
@@ -189,9 +190,15 @@ def correspondence(teacher: dict, student: dict, provider, log=print, batch: boo
                 resp = provider.analyze(req)
             results.append({"student": v["path"], "model": resp.model, "input_tokens": resp.input_tokens,
                             "output_tokens": resp.output_tokens, **resp.data})
+        except AwaitingAnswer as e:  # 回答待ち（候補 G5）: 失敗ではない
+            log(f"  先生と生徒の対応付け: 回答待ち（{e}）")
+            results.append({"student": v["path"], "awaiting": str(e)})
         except Exception as e:  # noqa: BLE001
             log(f"  先生と生徒の対応付けに失敗: {type(e).__name__}: {str(e)[:200]}")
             results.append({"student": v["path"], "error": f"{type(e).__name__}: {e}"})
+    if any("awaiting" in r for r in results):
+        return {"status": "awaiting", "results": results,
+                "method": "試験体の状態・加力段階・計測器の表示・操作の一致から判断（撮影時刻は使わない）"}
     return {"status": "done", "results": results,
             "method": "試験体の状態・加力段階・計測器の表示・操作の一致から判断（撮影時刻は使わない）"}
 
@@ -306,7 +313,13 @@ def main(argv: list[str] | None = None) -> int:
         for ip in sorted(Path(d).rglob("inventory.json")):
             items = items or [InventoryItem(**x) for x in json.loads(ip.read_text(encoding="utf-8"))]
     provider = None
-    if a.allow_external_ai:
+    if a.allow_external_ai and cfg.data["ai"]["provider"] != "anthropic":
+        # 設定のプロバイダに従う（候補 G5 の受け渡し口などで、意図せず有料の API を呼ばない）
+        from ..ai import make_provider
+        provider, why = make_provider(cfg, allow_external_flag=True)
+        if provider is None:
+            print(f"AI を使えません: {why}")
+    elif a.allow_external_ai:
         from ..ai.anthropic_provider import AnthropicProvider
         ai = cfg.data["ai"]
         provider = AnthropicProvider(model=ai.get("escalation_model") or ai["model"], effort=ai.get("escalation_effort", "high"),

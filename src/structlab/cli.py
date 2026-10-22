@@ -442,7 +442,11 @@ def cmd_check_draft(args) -> int:
     cfg = load_config(args.config)
     from .checks.deliverable import check_draft
     from .checks.report import write_checks_report
-    db = _open_db(cfg)
+    if args.db:  # 読み取り基盤・G5 の意味理解の DB（corpus/semantic_run/semantic.db）と照合する
+        from .db import DB
+        db = DB(Path(args.db))
+    else:
+        db = _open_db(cfg)
     counts = check_draft(db, cfg, Path(args.path), fmt=args.format, pages=args.pages)
     print(json.dumps(counts, ensure_ascii=False))
     print(f"詳細: {write_checks_report(db, cfg)}")
@@ -766,6 +770,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("path")
     p.add_argument("--format", default=None, help="提出形式（PDF / Word など）")
     p.add_argument("--pages", type=int, default=None)
+    p.add_argument("--db", help="照合に使う DB（例: work/g5/corpus/semantic_run/semantic.db）。省略時は設定の作業フォルダ")
     p = sub.add_parser("style", help="文章スタイル（最終工程のみ）: profile / status / apply")
     p.add_argument("action", choices=["profile", "status", "apply"])
     p.add_argument("input", nargs="?")
