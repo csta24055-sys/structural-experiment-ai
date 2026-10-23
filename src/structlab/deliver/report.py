@@ -118,7 +118,7 @@ def figures(inp: Inputs, outdir: Path) -> dict[str, dict]:
         plt.close(fig)
         out[name] = {"path": outdir / f"fig_{name}.png", "caption": cap}
 
-    note = "" if nv == len(inp.rows) else f"（たわみ No.2・No.3 の計測が途切れる {nv + 1} 行目より前のデータ）"
+    note = "" if nv == len(inp.rows) else f"（変位計 No.3 の計測が途切れる測定番号 {nv + 1} より前のデータ）"
     xfull = max(3.0, (int(max(dl) if dl else 3) + 1))
     load_deflection(xfull, "load_deflection", f"荷重 P と補正たわみ δ の関係（実験値と理論値・計算値）{note}")
     load_deflection(3.0, "load_deflection_zoom", "荷重 P と補正たわみ δ の関係（δ ≦ 3 mm の拡大。書式の図－2 と同じ範囲）")
