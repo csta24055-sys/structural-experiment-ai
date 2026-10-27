@@ -328,8 +328,12 @@ def _summary(res: dict) -> dict:
 
 def check_link(url: str, *, work_dir: Path | None = None, allow_download: bool = False,
                token: str | None = None, use_http: bool = True, use_browser: bool = True,
-               browser=browser_probe, http=http_probe, api=api_probe, downloader=api_download) -> BoxCheck:
+               browser=None, http=None, api=None, downloader=None) -> BoxCheck:
     """1 つの共有リンクを検査し、許可されていれば取得する。各手段は差し替え可能（テスト用）。"""
+    browser = browser or browser_probe
+    http = http or http_probe
+    api = api or api_probe
+    downloader = downloader or api_download
     rec = classify_url(url)
     chk = BoxCheck(url=rec.url)
     if rec.kind != "box_shared":

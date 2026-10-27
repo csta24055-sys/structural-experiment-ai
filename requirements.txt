@@ -17,6 +17,10 @@ pynacl>=1.5
 python-docx>=1.1
 matplotlib>=3.8
 
+# 試験対策システム（structlab-exam）: 公式の検算・Box 検査
+sympy>=1.12
+requests>=2.31
+
 # テスト用
 pytest>=8.0
 reportlab>=4.0

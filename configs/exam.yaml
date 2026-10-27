@@ -1,0 +1,118 @@
+# 試験対策システムの設定（structlab-exam）。コードから分離した判定条件・パターン。
+# 値を変えたら、次回の実行で該当する科目の判定と教材が作り直される。
+
+# 科目の一覧（任意）。空でも動く: その場合はフォルダ名・資料の表紙から科目を推定し、判断できなければ「要確認」。
+# name: 科目名 / aliases: ファイル名・フォルダ名に現れる別表記 / keywords: 内容に現れる専門用語 / teachers: 教員名
+subjects: []
+#  - name: 環境工学Ⅳ
+#    aliases: [環境工学4, 環境工学IV]
+#    keywords: [音圧レベル, 残響時間, 吸音率, 透過損失, 鏡像音源]
+#  - name: 鉄筋コンクリート構造Ⅱ
+#    aliases: [RC構造2, RC構造Ⅱ]
+#    keywords: [曲げ耐力, せん断補強, 中立軸, 引張鉄筋]
+
+# 教員の発言・資料の記述から出題根拠を見つけるパターン（正規表現）。
+# polarity: + は出題を支持、- は除外、0 は要確認（訂正など）。strength: 根拠の強さ（1〜3）。
+cues:
+  exam_explicit:
+    polarity: +
+    strength: 3
+    label: 出題の明示
+    patterns:
+      - (試験|テスト|期末|中間)(に|で|には)(必ず|絶対|たぶん|きっと)?(出|出題)(し?ます|る|す|題する|題します)
+      - (ここ|これ|この(問題|式|図|表|内容|範囲|部分))は(必ず|絶対)?(試験|テスト)に?(出|出題)
+      - 出題(します|する予定|範囲です)
+  memorize:
+    polarity: +
+    strength: 2
+    label: 暗記の指示
+    patterns:
+      - (覚えて|暗記して)(ください|おいて|おく|ね)
+      - (覚えておく|暗記しておく)(こと|べき)
+  important_formula:
+    polarity: +
+    strength: 2
+    label: 重要な式・内容の指示
+    patterns:
+      - (この|その|次の)(式|公式|関係式|定義)(は|が)(とても|非常に|特に)?重要
+      - (ここ|これ|ここの部分)(は|が)(とても|非常に|特に)?(重要|大事|ポイント)(です|だ|ですよ|になります)
+  frequent:
+    polarity: +
+    strength: 3
+    label: 頻出の指示
+    patterns:
+      - (毎年|例年|よく|頻繁に)(出|出題)(ます|て|る|され)
+      - 過去(に|の試験で)も?(出|出題)(ています|た|ました)
+  calc_skill:
+    polarity: +
+    strength: 2
+    label: 計算できるようにする指示
+    patterns:
+      - 計算(が)?できるように(して|なって|しておいて)
+      - (解ける|求められる)ように(して|なって|しておいて)
+  understand:
+    polarity: +
+    strength: 1
+    label: 理解の指示
+    patterns:
+      - (考え方|意味|違い|仕組み)を(しっかり|よく)?理解して
+  sufficient:
+    polarity: +
+    strength: 3
+    label: この問題が解ければ十分という指示
+    patterns:
+      - この(問題|演習|例題)が(解ければ|できれば)(大丈夫|十分|OK)
+  quiz:
+    polarity: +
+    strength: 2
+    label: 小テストでの確認
+    patterns:
+      - 小テストで(確認|出|聞き)
+  exclude:
+    polarity: "-"
+    strength: 3
+    label: 出題しない・範囲外の指示
+    patterns:
+      - (試験|テスト)(には|に|では)(出し?ません|出さない|出ない|出題しません|出題しない)
+      - (ここ|これ|この(部分|内容|式|範囲))は(試験|テスト)?(範囲外|範囲に含めません|出し?ません|出題しません)
+      - 範囲(から|より)?(外し|除外し|除き)ます
+      - 覚えなくて(いい|よい|大丈夫)
+  correction:
+    polarity: "0"
+    strength: 2
+    label: 訂正
+    patterns:
+      - (前回|先週|さっき|先ほど)の(説明|式|資料|スライド)(を|に)?(訂正|間違い|誤り)
+      - 訂正(します|してください)
+      - 正しくは
+  scope:
+    polarity: +
+    strength: 1
+    label: 試験範囲の告知
+    patterns:
+      - 試験範囲(は|：|:)
+      - 第\s*\d+\s*回(から|〜|~|－|-)\s*第?\s*\d+\s*回(まで)?が?(試験)?範囲
+
+# 出題可能性の判定（内部の点数。統計的な確率ではない）
+scoring:
+  weights:
+    explicit: 10      # 教員の明示（exam_explicit / frequent / sufficient）
+    directive: 4      # 暗記・重要・計算・小テストの指示
+    past_exam: 6      # 過去問 1 年度につき
+    repetition: 1.5   # 別の講義回・資料で同じ論点が再登場するごとに（上限あり）
+    assignment: 3     # 課題・演習・小テストに出た
+    emphasis: 1       # 資料上の強調（赤字・太字・「重要」の表記）。単独では採用しない
+    problemability: 1 # 問題にしやすい（式・定義・比較）。授業固有の証拠より弱い
+  repetition_cap: 3
+  a_threshold: 6      # A の下限
+  b_threshold: 2      # B の下限（これ未満で根拠が無く、未解析資料も無ければ C）
+
+# 外部 AI（有料 API）。初期状態は無効。明示的に許可したときだけ使う。
+ai:
+  enabled: false
+
+# 動画の読み取り
+video:
+  interval: 2.0          # 画面を調べる間隔（秒）
+  transcription: none    # none / faster_whisper（無料・ローカル。初回にモデルを取得）
+  whisper_model: small

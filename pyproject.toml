@@ -22,9 +22,15 @@ dependencies = [
 ai = ["anthropic>=1.0"]
 transcribe = ["faster-whisper>=1.0"]
 dev = ["pytest>=8.0", "reportlab>=4.0", "jsonschema>=4.0"]
+exam = ["reportlab>=4.0", "python-docx>=1.1", "sympy>=1.12", "requests>=2.31"]
+browser = ["playwright>=1.40"]
 
 [project.scripts]
 structlab = "structlab.cli:main"
+structlab-exam = "structlab.exam.cli:main"
+
+[tool.setuptools.package-data]
+"structlab.exam" = ["*.js"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
