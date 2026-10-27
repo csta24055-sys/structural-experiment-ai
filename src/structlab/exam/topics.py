@@ -22,7 +22,7 @@ def _tid(subject: str, title: str, n: int) -> str:
 
 
 def _lhs(f: str) -> str:
-    return re.split(r"[=＝]", f, 1)[0].strip()
+    return re.split(r"[=＝]", f, maxsplit=1)[0].strip()
 
 
 def _conflicting(fa: list[str], fb: list[str]) -> bool:

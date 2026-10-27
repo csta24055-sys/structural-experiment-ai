@@ -227,7 +227,10 @@ def analyze_subject(subject: str, mats: list[dict], readings: dict, cls: dict, c
     align = slide_alignment(mats, readings, topics)
 
     def slide_for_time(mid, t):
-        return next((a["topic"] for a in align if a["material"] == mid and a["start"] - 1 <= t <= a["end"] + 1), None)
+        mine = [a for a in align if a["material"] == mid]
+        hit = next((a for a in mine if a["start"] <= t < a["end"]), None)  # その時刻を含む場面を優先
+        hit = hit or next((a for a in mine if a["start"] - 1 <= t <= a["end"] + 1), None)
+        return hit["topic"] if hit else None
 
     Q.resolve_targets(cues, topics, slide_for_time)
     for c in cues:  # スライドに結びつかない発言（動画だけの授業など）は、発言から論点を作る

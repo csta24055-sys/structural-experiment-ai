@@ -182,3 +182,14 @@ def test_ai_must_stay_disabled(tmp_path):
     p.write_text("ai:\n  enabled: true\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         load_config(p)
+
+
+def test_named_topic_beats_screen_at_scene_boundary():
+    """場面の切り替わり（60 秒）の発言でも、文中で名指しした論点に結びつける（CI の OCR ありで見つかった不具合）。"""
+    ts = [topic("T1", "音の反射"), topic("T2", "鏡像音源法")]
+    cs = Q.find_cues([{"kind": "speech", "start": 60.0, "end": 70.0, "text": "鏡像音源法は試験に出します"}], "m", PAT, 3)
+    Q.resolve_targets(cs, ts, slide_for_time=lambda mid, t: "T1")
+    assert cs[0].target_topic == "T2" and cs[0].target_note == "文中に論点名"
+    cs = Q.find_cues([{"kind": "speech", "start": 60.0, "end": 70.0, "text": "この式は重要です"}], "m", PAT, 3)
+    Q.resolve_targets(cs, ts, slide_for_time=lambda mid, t: "T1")
+    assert cs[0].target_topic == "T1"  # 名指しが無ければ画面のスライド

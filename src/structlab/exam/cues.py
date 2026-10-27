@@ -79,26 +79,28 @@ def find_cues(units: list[dict], material: str, patterns, lecture: int | None = 
 def resolve_targets(cues: list[Cue], topics: list[dict], slide_for_time=None, min_sim: float = 0.25) -> None:
     """手がかりを論点に結びつける。
 
-    1) 発言の時刻に表示されていたスライド（slide_for_time）があれば、そのページの論点
-    2) 文と前後の文脈が最も似ている論点（しきい値未満なら特定できない）
+    1) 文中に論点の題名がそのまま出ていれば、その論点（画面より発言の明示を優先）
+    2) 発言の時刻に表示されていたスライド（slide_for_time）があれば、そのページの論点
+    3) 文と前後の文脈が最も似ている論点（しきい値未満なら特定できない）
     """
+    def score(c, t):
+        title = T.norm(t["title"]).replace(" ", "")
+        if len(title) >= 2 and title in T.norm(c.text).replace(" ", ""):
+            return 1.0 + len(title) / 100  # 論点の題名がその文に出ている（長い題名を優先）
+        s_text = T.similarity(c.text, t["title"] + " " + t["summary"])
+        return max(s_text, 0.6 * T.similarity(c.context, t["title"] + " " + t["summary"]))
+
     for c in cues:
         best, how = None, ""
-        if slide_for_time is not None and c.start is not None:
+        scored = sorted(((score(c, t), t["id"]) for t in topics), reverse=True)
+        if scored and scored[0][0] >= 1.0:
+            best, how = scored[0][1], "文中に論点名"
+        if best is None and slide_for_time is not None and c.start is not None:
             tid = slide_for_time(c.material, c.start)
             if tid:
                 best, how = tid, "発言時に表示されていたスライドの論点"
-        if best is None and topics:
-            def score(t):
-                title = T.norm(t["title"]).replace(" ", "")
-                if len(title) >= 2 and title in T.norm(c.text).replace(" ", ""):
-                    return 1.0 + len(title) / 100  # 論点の題名がその文に出ている（長い題名を優先）
-                s_text = T.similarity(c.text, t["title"] + " " + t["summary"])
-                return max(s_text, 0.6 * T.similarity(c.context, t["title"] + " " + t["summary"]))
-            scored = sorted(((score(t), t["id"]) for t in topics), reverse=True)
-            if scored and scored[0][0] >= min_sim:
-                best = scored[0][1]
-                how = "文中に論点名" if scored[0][0] >= 1.0 else f"文脈の類似（{scored[0][0]:.2f}）"
+        if best is None and scored and scored[0][0] >= min_sim:
+            best, how = scored[0][1], f"文脈の類似（{scored[0][0]:.2f}）"
         if c.formulas and "式" in c.text and best is None:
             how = "式は特定できたが論点に結びつかない"
         c.target_topic = best

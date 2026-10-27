@@ -43,11 +43,11 @@
 
 ## 4. テスト
 
-ローカル（Python 3.13）: **298 passed / 3 failed / 2 skipped**。
+ローカル（Python 3.13、tesseract あり）: **299 passed / 3 failed / 2 skipped**。
 
 - 失敗 3 件は `tests/test_requirements.py`（`requirements/process.yaml` が無い）。変更前の基準でも失敗しており、今回の変更とは無関係
 - 変更前の基準: 230 passed / 10 failed（上記 3 件・anthropic 未導入 6 件・.gitignore 1 件）。anthropic を入れ .gitignore を補うと 7 件は通る
-- 追加したテスト 61 件（`tests/test_exam_*.py`・`tests/test_restore_dump.py`）はすべて通過
+- 追加したテスト 62 件（`tests/test_exam_*.py`・`tests/test_restore_dump.py`）はすべて通過
 
 受け入れ試験（指示書 第 20 章）との対応: 合成データで確認したもの
 
@@ -57,7 +57,7 @@
 
 確認できていないもの:
 - 「数式が不鮮明」「音声の一部が不明瞭」「動画が複数ファイルに分割」の実データでの挙動（OCR・Whisper の精度は未評価）
-- 45（取得した動画の文字起こし・代表画面）は合成動画で場面抽出のみ確認。Whisper はこの環境に無く未実行。OCR（tesseract）もこの環境に無く、GitHub Actions でのみ使える
+- 45（取得した動画の文字起こし・代表画面）は合成動画で場面抽出のみ確認。Whisper はこの環境に無く未実行。OCR（tesseract）は途中で導入して合成動画で確認
 - 50（許可された動画からのクリップ生成）は未実装。代わりに動画の時刻と論点の対応（重要発言.json・スライド照合.json）を出す
 
 ## 5. 実データでの検証
@@ -75,7 +75,10 @@ Dropbox の `/授業動画` には動画は無く、Box 共有リンクの .url 
 
 ## 6. GitHub Actions
 
-- Tests: push ごとに実行。結果は §4 と同じ 3 件の失敗（process.yaml）
+- Tests: push ごとに実行。process.yaml の 3 件は失敗のまま（§4）
+- CI では OCR が使えるため、動画の画面とスライドの照合が働き、場面の切り替わり時刻（60 秒）の
+  「鏡像音源法は試験に出します」が直前のスライドの論点に結びつく不具合が見つかった（ローカルは OCR 無しで再現しなかった）。
+  文中で名指しした論点を画面より優先し、時刻はその時刻を含む場面を優先するよう修正し、回帰テストを追加
 - Exam preparation / Box link check: 追加済み。Dropbox の Secrets が未登録のため、まだ実行していない（未検証）
 
 ## 7. 利用者が行う操作
