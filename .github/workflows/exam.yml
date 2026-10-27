@@ -1,0 +1,80 @@
+# 試験対策教材の生成（手動実行）。Actions タブ → Exam preparation → Run workflow
+#
+# このリポジトリは公開されているため、授業内容を含む教材・処理状態は GitHub（Artifacts・キャッシュ・ログ）に
+# 残さず、Dropbox の出力フォルダにだけ保存する。ログには件数だけを出す（--quiet）。
+# リポジトリを非公開にした場合に限り、教材を Artifacts にも保存する（7 日で削除）。
+# 外部 AI（有料 API）は使わない。必要な Secrets: DROPBOX_APP_KEY / DROPBOX_APP_SECRET / DROPBOX_REFRESH_TOKEN
+# （出力フォルダへの保存に files.content.write の許可が必要）。任意: BOX_ACCESS_TOKEN（Box 公式 API で確認する場合）
+name: Exam preparation
+
+on:
+  workflow_dispatch:
+    inputs:
+      dropbox_root:
+        description: "資料のある Dropbox フォルダ（例: /授業動画）"
+        type: string
+        default: "/授業動画"
+      dropbox_out:
+        description: "教材の保存先 Dropbox フォルダ（資料フォルダと重ならないこと）"
+        type: string
+        default: "/試験対策出力"
+      allow_download:
+        description: "Box でダウンロードが許可されている動画だけ、公式の手段で取得して解析する"
+        type: boolean
+        default: false
+      transcription:
+        description: "動画音声の文字起こし（無料・ローカルの faster-whisper）"
+        type: choice
+        options: [none, faster_whisper]
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exam-preparation
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      BOX_ACCESS_TOKEN: ${{ secrets.BOX_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg tesseract-ocr tesseract-ocr-jpn fonts-ipafont-gothic
+      - name: Python packages
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e . playwright
+          python -m playwright install --with-deps chromium
+          if [ "${{ inputs.transcription }}" = "faster_whisper" ]; then python -m pip install faster-whisper; fi
+      - name: Settings
+        run: |
+          sed -i "s/^  transcription: .*/  transcription: ${{ inputs.transcription }}/" configs/exam.yaml
+          structlab-exam env | python -c "import json,sys; d=json.load(sys.stdin); print({k: bool(v) for k, v in d.items() if k != 'secrets'}, d['secrets'])"
+      - name: Build materials
+        env:
+          ROOT: ${{ inputs.dropbox_root }}
+          OUT: ${{ inputs.dropbox_out }}
+        run: |
+          structlab-exam run --dropbox-root "$ROOT" --dropbox-out "$OUT" --quiet \
+            ${{ inputs.allow_download && '--allow-download' || '' }}
+      - name: Keep materials as artifact (private repository only)
+        if: ${{ always() && github.event.repository.private }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: exam-materials
+          path: output/exam
+          retention-days: 7
+          if-no-files-found: ignore

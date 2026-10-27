@@ -1,0 +1,58 @@
+# Box 共有リンクの検査（手動実行）。共有ページを開けるか・動画か・ダウンロードが許可されているかを判定する。
+# 公開リポジトリのため、URL・ファイル名はログに出さず（--quiet）、結果は Dropbox の出力フォルダに保存する。
+name: Box link check
+
+on:
+  workflow_dispatch:
+    inputs:
+      dropbox_url_file:
+        description: "Box リンクを記録した Dropbox の .url / テキスト（例: /授業動画/xxx.url）"
+        type: string
+        required: true
+      dropbox_out:
+        description: "結果の保存先 Dropbox フォルダ"
+        type: string
+        default: "/試験対策出力"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: box-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      BOX_ACCESS_TOKEN: ${{ secrets.BOX_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e . playwright
+          python -m playwright install --with-deps chromium
+      - name: Check
+        env:
+          SRC: ${{ inputs.dropbox_url_file }}
+          OUT: ${{ inputs.dropbox_out }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          from structlab.sources.dropbox_source import DropboxOutput, make_client
+          src, out = os.environ["SRC"], os.environ["OUT"]
+          Path("work").mkdir(exist_ok=True)
+          make_client().files_download_to_file("work/link.url", src)   # 読み取りのみ
+          rc = subprocess.call(["structlab-exam", "box-check", "work/link.url", "--quiet", "--json", "work/box_check.json"])
+          DropboxOutput(out, str(Path(src).parent)).upload(Path("work/box_check.json"), "試験対策システム/Boxリンク管理/単体検査結果.json")
+          sys.exit(rc)
+          PY

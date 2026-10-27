@@ -36,6 +36,10 @@ def load_config(path: Path | None = None) -> dict:
     return cfg
 
 
+class DropboxUnavailable(RuntimeError):
+    """Dropbox の認証・接続に失敗した（理由は伏せ字済み）。"""
+
+
 @dataclass
 class Options:
     input_dir: Path | None = None
@@ -74,8 +78,14 @@ def discover_all(o: Options) -> Discovery:
     if o.input_dir:
         discover_local(o.input_dir, d)
     if o.dropbox_root is not None:
-        from ..sources.dropbox_source import DropboxSource
-        discover_dropbox(DropboxSource(o.dropbox_root), o.work / "dropbox_cache", d)
+        from ..sources.base import SourceError
+        from ..sources.dropbox_source import DropboxSource, redact
+        try:
+            discover_dropbox(DropboxSource(o.dropbox_root), o.work / "dropbox_cache", d)
+        except SourceError as e:
+            raise DropboxUnavailable(f"Dropbox に接続できません: {redact(str(e))}") from None
+        except Exception as e:  # noqa: BLE001  # dropbox ライブラリの認証・通信エラー
+            raise DropboxUnavailable(f"Dropbox に接続できません（{type(e).__name__}）: {redact(str(e))[:300]}") from None
     from .links import classify_url
     for u in o.box_urls:
         r = classify_url(u)

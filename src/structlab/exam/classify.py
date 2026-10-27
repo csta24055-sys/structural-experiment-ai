@@ -55,7 +55,7 @@ def _catalog_hits(cat: list[dict], path: str, text: str) -> list[tuple[float, st
                 break
         kw = [k for k in s.get("keywords", []) if T.norm(k) in tx]
         if kw:
-            score += min(len(kw), 5) * 0.8
+            score += min(len(kw), 5) * 1.0  # 専門用語 3 語以上で判定できる
             ev.append(f"専門用語 {kw[:5]}")
         for t in s.get("teachers", []):
             if t in tx or t in p:
