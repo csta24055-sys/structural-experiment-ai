@@ -1,0 +1,4059 @@
+# 試験出題予測・集中対策システム（structlab-exam）のコード全文
+# 出典: ブランチ claude/busy-fermat-ybka8s の commit cdddcd0。全文・無修正。
+# ファイル数: 27
+
+====================================================================================================
+# ファイル: src/structlab/exam/__init__.py
+====================================================================================================
+"""試験出題予測・集中対策システム。
+
+授業動画・配布資料・課題・過去問（Dropbox / ローカル / Box 共有リンク）を読み、
+出題根拠のある論点だけを S/A/B/C で選び、対策教材と模擬テスト 3 回分を作る。
+
+処理の段階（それぞれ別モジュール。内容データと文書出力は分離している）:
+  discover → links/box（入力の発見・Box 取得可否） → analyze（動画・PDF 読み取り）
+  → classify（科目・講義回） → cues/topics（出題根拠） → scoring（S/A/B/C）
+  → questions（問題・解答） → render（PDF・Word）
+"""
+
+====================================================================================================
+# ファイル: src/structlab/exam/__main__.py
+====================================================================================================
+import sys
+
+from .cli import main
+
+sys.exit(main())
+
+====================================================================================================
+# ファイル: src/structlab/exam/links.py
+====================================================================================================
+"""Dropbox の .url ファイル・テキストから Box 共有リンクを取り出して検証する。
+
+Box 以外のリンクを Box として扱わない。許可したホスト名（*.box.com）以外には接続しない。
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+#: Box 共有リンクとして扱うホスト（サブドメインを含む）
+BOX_HOST_SUFFIXES = ("box.com",)
+#: 共有リンクのパス: /s/<識別子>（共有リンク） /v/<名前>（独自 URL）
+SHARE_PATH = re.compile(r"^/(s|v)/([A-Za-z0-9_\-]+)(?:/|$)")
+URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>\]\)）」]+")
+#: 追跡用の問い合わせ（utm_* など）は除く。リンクの同一性の判定に使わない
+TRACKING = re.compile(r"^(utm_|fbclid$|gclid$)")
+
+
+@dataclass
+class LinkRecord:
+    url: str                      # 正規化した URL
+    raw: str                      # 元の文字列
+    kind: str                     # box_shared | box_other | other | invalid
+    host: str = ""
+    shared_id: str = ""
+    sources: list[str] = field(default_factory=list)  # 見つけた場所（Dropbox のパスなど）
+    problem: str = ""
+
+    def as_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+def decode_bytes(data: bytes) -> tuple[str, str]:
+    """.url / テキストの文字コードを判定する。戻り値: (本文, 文字コード)"""
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data[3:].decode("utf-8", errors="replace"), "utf-8-sig"
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace"), "utf-16"
+    for enc in ("utf-8", "cp932", "euc_jp"):
+        try:
+            return data.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace"), "utf-8(置換あり)"
+
+
+def is_box_host(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    return any(host == s or host.endswith("." + s) for s in BOX_HOST_SUFFIXES)
+
+
+def normalize(url: str) -> str:
+    parts = urlsplit(url.strip())
+    query = urlencode([(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if not TRACKING.match(k)])
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/", query, ""))
+
+
+def classify_url(raw: str) -> LinkRecord:
+    raw = raw.strip()
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return LinkRecord(url=raw, raw=raw, kind="invalid", problem="URL として解釈できない")
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return LinkRecord(url=raw, raw=raw, kind="invalid", problem="http(s) の URL ではない")
+    if parts.username or parts.password:
+        return LinkRecord(url=raw, raw=raw, kind="invalid", problem="URL に認証情報が含まれている")
+    host = (parts.hostname or "").lower()
+    url = normalize(raw)
+    if not is_box_host(host):
+        return LinkRecord(url=url, raw=raw, kind="other", host=host)
+    if parts.scheme != "https":
+        url = "https" + url[len("http"):]
+    m = SHARE_PATH.match(parts.path)
+    if m:
+        return LinkRecord(url=url, raw=raw, kind="box_shared", host=host, shared_id=m.group(2))
+    return LinkRecord(url=url, raw=raw, kind="box_other", host=host, problem="Box の共有リンク形式（/s/ /v/）ではない")
+
+
+def parse_internet_shortcut(text: str) -> list[str]:
+    """Windows の .url（[InternetShortcut] / URL=...）から URL を取り出す。無ければ本文中の URL。"""
+    urls = []
+    in_section = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_section = s.lower() == "[internetshortcut]"
+            continue
+        if in_section and s.lower().startswith("url="):
+            urls.append(s[4:].strip())
+    return urls or find_urls(text)
+
+
+def find_urls(text: str) -> list[str]:
+    return [u.rstrip(".,;、。") for u in URL_IN_TEXT.findall(text)]
+
+
+def extract_links(data: bytes, name: str, source: str) -> tuple[list[LinkRecord], dict]:
+    """1 ファイル分。戻り値: (リンク, 読み取り記録)"""
+    text, enc = decode_bytes(data)
+    raws = parse_internet_shortcut(text) if name.lower().endswith(".url") else find_urls(text)
+    recs = []
+    for r in raws:
+        rec = classify_url(r)
+        rec.sources.append(source)
+        recs.append(rec)
+    log = {"source": source, "encoding": enc, "n_urls": len(recs)}
+    if not recs:
+        log["problem"] = "URL が見つからない（.url が壊れている可能性）"
+    return recs, log
+
+
+def dedupe(records: list[LinkRecord]) -> list[LinkRecord]:
+    """同じリンク（正規化後の URL が同じ）を 1 件にまとめ、見つけた場所をすべて残す。"""
+    out: dict[str, LinkRecord] = {}
+    for r in records:
+        key = f"box:{r.host.split('.')[0] if r.host.endswith('.box.com') else r.host}:{r.shared_id}" \
+            if r.kind == "box_shared" else r.url
+        if key in out:
+            out[key].sources += [s for s in r.sources if s not in out[key].sources]
+        else:
+            out[key] = LinkRecord(**{**r.__dict__, "sources": list(r.sources)})
+    return list(out.values())
+
+====================================================================================================
+# ファイル: src/structlab/exam/box.py
+====================================================================================================
+"""Box 共有リンクの検査と、許可されている場合だけの動画取得。
+
+共有ページを開けることと、動画本体を取得・解析できることは別に扱う。状態は次の 6 つ:
+
+  A downloaded        動画本体を取得でき、解析処理へ渡せる
+  B preview_only      ページ上で再生・プレビューはできるが、ダウンロードは許可されていない
+  C metadata_only     ファイル名などのメタデータだけ確認できた（再生・取得の可否は不明）
+  D auth_required     ログインまたはパスワードが必要
+  E inaccessible      リンク切れ・共有停止・ネットワーク制限・タイムアウトなど
+  F unprocessable     取得はできたが壊れている・形式に対応していない
+
+確認できない項目は None のまま残し、推測で埋めない。
+ダウンロード禁止の設定・認証・DRM を回避する処理（再生用通信の横取りなど）は実装しない。
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urljoin, urlsplit
+
+from .links import classify_url, is_box_host
+
+STATES = {
+    "A": "downloaded", "B": "preview_only", "C": "metadata_only",
+    "D": "auth_required", "E": "inaccessible", "F": "unprocessable",
+}
+STATE_LABEL = {
+    "A": "動画本体を取得済み", "B": "再生のみ可（ダウンロード不可）", "C": "メタデータのみ確認",
+    "D": "認証が必要", "E": "アクセス不可", "F": "取得したが解析不可",
+}
+VIDEO_EXT = {"mp4", "mov", "m4v", "mkv", "webm", "avi", "wmv"}
+API = "https://api.box.com/2.0"
+NODE_SCRIPT = Path(__file__).with_name("box_browser.js")
+
+LOGIN_TEXT = re.compile(r"Log in to Box|Sign in to Box|Box にログイン|ログインしてください|Enter your email", re.I)
+REMOVED_TEXT = re.compile(
+    r"link has been removed|is unavailable to you|no longer available|リンクは削除|利用できなくなりました|"
+    r"This shared file or folder link has been removed|Shared link expired|有効期限が切れ", re.I)
+PASSWORD_TEXT = re.compile(r"password[- ]protected|パスワードを入力|Enter (the )?password", re.I)
+DURATION = re.compile(r"/\s*(\d{1,2}:\d{2}(?::\d{2})?)")
+
+
+def _json_bool(html: str, key: str) -> bool | None:
+    m = re.search(rf'"{key}"\s*:\s*(true|false)', html)
+    return None if m is None else m.group(1) == "true"
+
+
+def _json_int(html: str, key: str) -> int | None:
+    m = re.search(rf'"{key}"\s*:\s*(\d+)', html)
+    return int(m.group(1)) if m else None
+
+
+def parse_duration(s: str | None) -> float | None:
+    if not s:
+        return None
+    parts = [int(x) for x in s.split(":")]
+    sec = 0
+    for p in parts:
+        sec = sec * 60 + p
+    return float(sec)
+
+
+def parse_page(html: str, text: str, title: str = "", final_url: str = "", has_password_input: bool = False) -> dict:
+    """描画後の共有ページから、ページ自身が示している情報だけを取り出す。"""
+    meta: dict = {"name": None, "item_type": None, "extension": None, "size": None, "duration_text": None,
+                  "duration_sec": None, "can_download": None, "can_preview": None, "item_id": None,
+                  "page_kind": "unknown", "evidence": []}
+    host = (urlsplit(final_url).hostname or "") if final_url else ""
+    path = urlsplit(final_url).path if final_url else ""
+    if has_password_input or PASSWORD_TEXT.search(text):
+        meta["page_kind"] = "password"
+        meta["evidence"].append("パスワード入力欄")
+        return meta
+    if REMOVED_TEXT.search(text) or REMOVED_TEXT.search(title):
+        meta["page_kind"] = "removed"
+        meta["evidence"].append("リンク削除・期限切れの表示")
+        return meta
+    m = re.search(r'"typedID"\s*:\s*"([fd])_(\d+)"', html)
+    if m:
+        meta["item_type"] = "file" if m.group(1) == "f" else "folder"
+        meta["item_id"] = m.group(2)
+        meta["evidence"].append(f"typedID {m.group(1)}_{m.group(2)}")
+        # typedID と同じオブジェクト内の extension / name（ページ利用者の name とは別）
+        seg = html[m.start(): m.start() + 600]
+        e = re.search(r'"extension"\s*:\s*"([A-Za-z0-9]+)"', seg)
+        n = re.search(r'"name"\s*:\s*"((?:[^"\\]|\\.)+)"', seg)
+        if e:
+            meta["extension"] = e.group(1).lower()
+        if n:
+            meta["name"] = json.loads(f'"{n.group(1)}"')
+        meta["size"] = _json_int(seg, "itemSize") or _json_int(html, "itemSize")
+    if meta["name"] is None and title and "|" in title:
+        cand = title.split("|")[0].strip()
+        if cand and cand.lower() not in ("box", "log in", "sign in"):
+            meta["name"] = cand
+            meta["evidence"].append("ページタイトル")
+    if meta["extension"] is None and meta["name"] and "." in meta["name"]:
+        meta["extension"] = meta["name"].rsplit(".", 1)[1].lower()
+    cd = [v for v in (_json_bool(html, "canDownload"), _json_bool(html, "can_download")) if v is not None]
+    if cd:
+        meta["can_download"] = all(cd)  # 片方でも禁止なら禁止として扱う
+        meta["evidence"].append(f"can_download={meta['can_download']}")
+    meta["can_preview"] = _json_bool(html, "can_preview")
+    d = DURATION.search(text)
+    if d and meta["extension"] in VIDEO_EXT:
+        meta["duration_text"] = d.group(1)
+        meta["duration_sec"] = parse_duration(d.group(1))
+    login_page = "login" in path.lower() or host.startswith("account.") or (
+        LOGIN_TEXT.search(text) and meta["item_id"] is None)
+    if login_page:
+        meta["page_kind"] = "login"
+        meta["evidence"].append("ログイン画面")
+    elif meta["item_id"] or meta["name"]:
+        meta["page_kind"] = "item"
+    return meta
+
+
+# ---------------- 取得手段 ----------------
+def http_probe(url: str, session=None, timeout: float = 20.0, max_redirects: int = 5) -> dict:
+    """通常の HTTP 取得。リダイレクトは Box のホストの中だけ追う（認証情報は送らない）。"""
+    import requests
+    s = session or requests.Session()
+    out = {"ok": False, "status": None, "final_url": url, "redirects": [], "error_kind": None}
+    cur = url
+    try:
+        for _ in range(max_redirects + 1):
+            r = s.get(cur, allow_redirects=False, timeout=timeout, headers={"User-Agent": "structlab-exam/1.0"})
+            out["status"] = r.status_code
+            if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+                nxt = urljoin(cur, r.headers.get("Location", ""))
+                out["redirects"].append(nxt)
+                if not is_box_host(urlsplit(nxt).hostname or ""):
+                    out["error_kind"] = "redirect_outside_box"
+                    out["final_url"] = nxt
+                    return out
+                cur = nxt
+                continue
+            out["final_url"] = cur
+            out["ok"] = r.status_code < 400
+            out["html_length"] = len(r.text)
+            out["text_sample"] = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", r.text))[:200]
+            if r.status_code in (401, 403):
+                out["error_kind"] = "auth"
+            elif r.status_code == 404 or r.status_code == 410:
+                out["error_kind"] = "not_found"
+            elif r.status_code >= 400:
+                out["error_kind"] = "http_error"
+            return out
+        out["error_kind"] = "too_many_redirects"
+    except Exception as e:  # noqa: BLE001
+        name = type(e).__name__
+        out["error_kind"] = "timeout" if "Timeout" in name else "network"
+        out["error"] = f"{name}: {str(e)[:200]}"
+    return out
+
+
+def browser_available() -> dict:
+    """使えるブラウザ手段を調べる（決めつけない）。"""
+    info = {"python_playwright": False, "node_playwright": False, "node": shutil.which("node")}
+    try:
+        import playwright.sync_api  # noqa: F401
+        info["python_playwright"] = True
+    except ImportError:
+        pass
+    if info["node"]:
+        try:
+            r = subprocess.run([info["node"], "-e", "require('playwright')"], capture_output=True, timeout=30)
+            info["node_playwright"] = r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return info
+
+
+def _browser_python(url: str, timeout_ms: int, download_dir: Path | None) -> dict:
+    from playwright.sync_api import sync_playwright
+    out: dict = {"ok": False, "backend": "python-playwright", "url": url}
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        try:
+            page = b.new_page(accept_downloads=bool(download_dir))
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            out["http_status"] = resp.status if resp else None
+            try:
+                page.wait_for_function(
+                    "() => ((document.body && document.body.innerText) || '').trim().length > 40"
+                    " || document.querySelector('input[type=password]')", timeout=timeout_ms)
+            except Exception:  # noqa: BLE001
+                out["render_timeout"] = True
+            if page.query_selector("video") or re.search(r"\.(mp4|mov|m4v|mkv|webm)\b", page.title(), re.I):
+                try:
+                    page.wait_for_function("() => { const v = document.querySelector('video');"
+                                           " return v && isFinite(v.duration) && v.duration > 0 }",
+                                           timeout=min(timeout_ms, 20000))
+                except Exception:  # noqa: BLE001
+                    pass
+            out["video_duration"] = page.evaluate(
+                "() => { const v = document.querySelector('video'); return v && isFinite(v.duration) ? v.duration : null }")
+            out.update(final_url=page.url, title=page.title(), html=page.content(),
+                       text=page.evaluate("() => (document.body && document.body.innerText) || ''"),
+                       has_password_input=page.query_selector("input[type=password]") is not None, ok=True)
+            if download_dir:
+                btn = page.query_selector('[data-testid=download-preview], button[aria-label="Download"]')
+                if not btn:
+                    out["download"] = {"ok": False, "reason": "ダウンロードボタンが無い"}
+                else:
+                    with page.expect_download(timeout=timeout_ms) as dl:
+                        btn.click()
+                    d = dl.value
+                    dest = download_dir / d.suggested_filename
+                    d.save_as(str(dest))
+                    out["download"] = {"ok": True, "path": str(dest), "name": d.suggested_filename}
+        except Exception as e:  # noqa: BLE001
+            out["error"] = str(e)[:500]
+            out["error_kind"] = "timeout" if "Timeout" in type(e).__name__ else "browser"
+        finally:
+            b.close()
+    return out
+
+
+def browser_probe(url: str, timeout_ms: int = 45000, download_dir: Path | None = None,
+                  backend: str = "auto") -> dict:
+    avail = browser_available()
+    if backend in ("auto", "python") and avail["python_playwright"]:
+        return _browser_python(url, timeout_ms, download_dir)
+    if backend in ("auto", "node") and avail["node_playwright"]:
+        cmd = [avail["node"], str(NODE_SCRIPT), url, "--timeout", str(timeout_ms)]
+        if download_dir:
+            cmd += ["--download", str(download_dir)]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_ms / 1000 * 3 + 30)
+            return json.loads(r.stdout or "{}") or {"ok": False, "error_kind": "browser", "error": r.stderr[:500]}
+        except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+            return {"ok": False, "backend": "node-playwright", "error_kind": "timeout", "error": str(e)[:300]}
+    return {"ok": False, "backend": None, "error_kind": "browser_unavailable",
+            "error": "Playwright（Python 版・Node 版とも）が使えません。"
+                     "pip install playwright && python -m playwright install chromium で導入できます",
+            "availability": avail}
+
+
+def api_probe(url: str, token: str | None, session=None, timeout: float = 30.0) -> dict:
+    """Box 公式 API（GET /shared_items、BoxApi: shared_link=...）で共有リンクの項目と権限を調べる。"""
+    if not token:
+        return {"ok": False, "error_kind": "no_token", "error": "BOX_ACCESS_TOKEN が設定されていません"}
+    import requests
+    s = session or requests.Session()
+    headers = {"Authorization": f"Bearer {token}", "BoxApi": f"shared_link={url}"}
+    try:
+        r = s.get(f"{API}/shared_items", headers=headers, timeout=timeout,
+                  params={"fields": "id,type,name,size,extension,permissions,shared_link,content_duration"})
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error_kind": "network", "error": type(e).__name__}
+    if r.status_code != 200:
+        kind = {401: "auth", 403: "forbidden", 404: "not_found"}.get(r.status_code, "http_error")
+        return {"ok": False, "status": r.status_code, "error_kind": kind}
+    d = r.json()
+    perms = d.get("permissions") or {}
+    sl_perms = (d.get("shared_link") or {}).get("permissions") or {}
+    can = [v for v in (perms.get("can_download"), sl_perms.get("can_download")) if v is not None]
+    return {"ok": True, "id": d.get("id"), "type": d.get("type"), "name": d.get("name"), "size": d.get("size"),
+            "extension": (d.get("extension") or "").lower() or None,
+            "can_download": all(can) if can else None, "can_preview": perms.get("can_preview")}
+
+
+def api_download(url: str, token: str, file_id: str, dest: Path, session=None) -> Path:
+    """公式 API（GET /files/{id}/content）で取得する。権限が無ければ Box 側が拒否する。"""
+    import requests
+    s = session or requests.Session()
+    headers = {"Authorization": f"Bearer {token}", "BoxApi": f"shared_link={url}"}
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    with s.get(f"{API}/files/{file_id}/content", headers=headers, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        with open(part, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                f.write(chunk)
+    part.replace(dest)
+    return dest
+
+
+# ---------------- 判定 ----------------
+@dataclass
+class BoxCheck:
+    url: str
+    state: str = "E"
+    reason: str = ""
+    checked_at: float = field(default_factory=time.time)
+    name: str | None = None
+    item_type: str | None = None
+    extension: str | None = None
+    size: int | None = None
+    duration_sec: float | None = None
+    duration_text: str | None = None
+    is_video: bool | None = None
+    can_download: bool | None = None
+    can_preview: bool | None = None
+    local_path: str | None = None
+    methods: dict = field(default_factory=dict)  # http / browser / api / download の結果（本文は除く）
+    alternatives: list[str] = field(default_factory=list)
+
+    @property
+    def analyzable(self) -> bool:
+        return self.state == "A" and bool(self.local_path)
+
+    def as_dict(self) -> dict:
+        d = dict(self.__dict__)
+        d["state_name"] = STATES[self.state]
+        d["state_label"] = STATE_LABEL[self.state]
+        return d
+
+
+ALTERNATIVES = [
+    "教員・大学から動画ファイルの提供を受け、input フォルダ（または Dropbox）に置く",
+    "Box 上でダウンロードが許可されている場合は、自分で保存した動画ファイルを置く",
+    "正規に提供された字幕・文字起こし（.vtt / .srt / .txt）があれば、動画と同じ名前で置く",
+    "配布スライド・課題・過去問だけでも解析は進む（この動画の発言は未解析として扱われる）",
+]
+
+
+def _summary(res: dict) -> dict:
+    return {k: v for k, v in res.items() if k not in ("html", "text")}
+
+
+def check_link(url: str, *, work_dir: Path | None = None, allow_download: bool = False,
+               token: str | None = None, use_http: bool = True, use_browser: bool = True,
+               browser=None, http=None, api=None, downloader=None) -> BoxCheck:
+    """1 つの共有リンクを検査し、許可されていれば取得する。各手段は差し替え可能（テスト用）。"""
+    browser = browser or browser_probe
+    http = http or http_probe
+    api = api or api_probe
+    downloader = downloader or api_download
+    rec = classify_url(url)
+    chk = BoxCheck(url=rec.url)
+    if rec.kind != "box_shared":
+        chk.reason = f"Box の共有リンクではない（{rec.kind}{'、' + rec.problem if rec.problem else ''}）"
+        return chk
+    token = token if token is not None else os.environ.get("BOX_ACCESS_TOKEN")
+    meta: dict = {}
+    if use_http:
+        h = http(rec.url)
+        chk.methods["http"] = _summary(h)
+    if token:
+        a = api(rec.url, token)
+        chk.methods["api"] = a
+        if a.get("ok"):
+            meta.update({k: a.get(k) for k in ("name", "size", "extension", "can_download", "can_preview")})
+            meta["item_type"] = a.get("type")
+            meta["item_id"] = a.get("id")
+            meta["page_kind"] = "item"
+    else:
+        chk.methods["api"] = {"ok": False, "error_kind": "no_token"}
+    if use_browser and meta.get("page_kind") != "item":
+        b = browser(rec.url)
+        chk.methods["browser"] = _summary(b)
+        if b.get("ok"):
+            pm = parse_page(b.get("html", ""), b.get("text", ""), b.get("title", ""), b.get("final_url", ""),
+                            b.get("has_password_input", False))
+            chk.methods["browser"]["parsed"] = {k: v for k, v in pm.items() if k != "evidence"}
+            chk.methods["browser"]["evidence"] = pm["evidence"]
+            if pm["duration_sec"] is None and b.get("video_duration") and pm.get("extension") in VIDEO_EXT:
+                pm["duration_sec"] = round(float(b["video_duration"]), 2)
+                pm["duration_text"] = time.strftime("%H:%M:%S", time.gmtime(pm["duration_sec"]))
+            meta = {**pm, **{k: v for k, v in meta.items() if v is not None}}
+    for k in ("name", "item_type", "extension", "size", "duration_sec", "duration_text", "can_download", "can_preview"):
+        if meta.get(k) is not None:
+            setattr(chk, k, meta[k])
+    if chk.extension:
+        chk.is_video = chk.extension in VIDEO_EXT
+    kind = meta.get("page_kind")
+    http_err = chk.methods.get("http", {}).get("error_kind")
+    br = chk.methods.get("browser", {})
+    if kind == "password":
+        chk.state, chk.reason = "D", "パスワードの入力が必要"
+    elif kind == "login" or http_err == "auth" or chk.methods["api"].get("error_kind") == "forbidden":
+        chk.state, chk.reason = "D", "ログイン（大学アカウント等）が必要"
+    elif kind == "removed" or http_err == "not_found":
+        chk.state, chk.reason = "E", "リンクが削除・期限切れ・共有停止になっている"
+    elif kind == "item":
+        if chk.can_download is False:
+            chk.state = "B" if chk.can_preview is not False else "C"
+            chk.reason = "共有設定でダウンロードが許可されていない" + ("（ページ上の再生は可）" if chk.state == "B" else "")
+        elif chk.can_download is True:
+            chk.state, chk.reason = "C", "ダウンロード可。まだ取得していない（--allow-download で取得）"
+            if allow_download and work_dir is not None:
+                _download(chk, rec.url, token, meta, work_dir, browser, downloader)
+        else:
+            chk.state, chk.reason = "C", "ファイル名などは確認できたが、ダウンロード可否は確認できない"
+    elif br.get("error_kind") == "browser_unavailable" and not http_err:
+        chk.state, chk.reason = "C" if chk.methods.get("http", {}).get("ok") else "E", \
+            "ブラウザが無いため共有ページの内容を確認できない（ページの応答のみ確認）"
+    else:
+        ek = br.get("error_kind") or http_err or "unknown"
+        chk.state = "E"
+        chk.reason = {"timeout": "タイムアウト", "network": "ネットワークに接続できない（制限の可能性）",
+                      "redirect_outside_box": "Box 以外へ転送された", "browser": "ページの描画に失敗"}.get(
+            ek, f"アクセスできない（{ek}）")
+    if chk.state != "A":
+        chk.alternatives = list(ALTERNATIVES)
+    return chk
+
+
+def _download(chk: BoxCheck, url: str, token: str | None, meta: dict, work_dir: Path, browser, downloader) -> None:
+    dl_dir = work_dir / "box_downloads"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if token and meta.get("item_id"):
+            p = downloader(url, token, str(meta["item_id"]), dl_dir / (chk.name or f"{meta['item_id']}.bin"))
+            chk.methods["download"] = {"ok": True, "via": "api"}
+        else:
+            b = browser(url, download_dir=dl_dir)
+            d = b.get("download") or {}
+            chk.methods["download"] = {"via": "browser", **d}
+            if not d.get("ok"):
+                chk.reason = f"ダウンロード操作に失敗: {d.get('reason') or b.get('error_kind')}"
+                return
+            p = Path(d["path"])
+    except Exception as e:  # noqa: BLE001
+        chk.methods["download"] = {"ok": False, "error": type(e).__name__}
+        chk.reason = f"ダウンロードに失敗（{type(e).__name__}）"
+        return
+    chk.local_path = str(p)
+    if chk.is_video:
+        try:
+            from .. import media
+            info = media.probe(p)
+            if not info.has_video and not info.has_audio:
+                raise ValueError("映像・音声が無い")
+            chk.duration_sec = chk.duration_sec or round(info.duration, 2)
+            chk.state, chk.reason = "A", "公式の手段でダウンロードし、映像・音声を確認した"
+        except Exception as e:  # noqa: BLE001
+            chk.state, chk.reason = "F", f"取得したが動画として読めない（{str(e)[:120]}）"
+    else:
+        chk.state, chk.reason = "A", "公式の手段でダウンロードした"
+
+====================================================================================================
+# ファイル: src/structlab/exam/box_browser.js
+====================================================================================================
+// Box 共有ページを Chromium で開き、描画後のページ情報を JSON で標準出力に書く（Node 版 Playwright 用）。
+// 使い方: node box_browser.js <url> [--download <dir>] [--timeout <ms>]
+// --download は、ページ自身が「ダウンロード可」と示しているときに通常のダウンロード操作だけを行う。
+// 再生用の通信を横取りしてファイルを取り出すことはしない。
+const { chromium } = require('playwright');
+
+function arg(name, def) {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : def;
+}
+
+(async () => {
+  const url = process.argv[2];
+  const timeout = parseInt(arg('--timeout', '45000'), 10);
+  const downloadDir = arg('--download', null);
+  const out = { ok: false, backend: 'node-playwright', url };
+  let browser;
+  try {
+    browser = await chromium.launch();
+    const page = await browser.newPage({ acceptDownloads: !!downloadDir });
+    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    out.http_status = resp ? resp.status() : null;
+    // networkidle は動画プレーヤーの通信で終わらないことがあるため使わない。
+    // 本文が描画される（ファイル名・ログイン画面・エラー文のどれかが出る）まで待つ。
+    await page.waitForFunction(() => {
+      const t = (document.body && document.body.innerText || '').trim();
+      return t.length > 40 || document.querySelector('input[type=password]');
+    }, null, { timeout }).catch(() => { out.render_timeout = true; });
+    // 動画のときはプレーヤーが再生時間を読み込むまで待つ（取れなければ不明のまま）
+    if (await page.$('video') || /\.(mp4|mov|m4v|mkv|webm)\b/i.test(await page.title())) {
+      await page.waitForFunction(() => {
+        const v = document.querySelector('video');
+        return v && isFinite(v.duration) && v.duration > 0;
+      }, null, { timeout: Math.min(timeout, 20000) }).catch(() => {});
+    }
+    out.video_duration = await page.evaluate(() => {
+      const v = document.querySelector('video');
+      return v && isFinite(v.duration) ? v.duration : null;
+    });
+    out.final_url = page.url();
+    out.title = await page.title();
+    out.text = await page.evaluate(() => (document.body && document.body.innerText) || '');
+    out.html = await page.content();
+    out.has_password_input = !!(await page.$('input[type=password]'));
+    out.ok = true;
+    if (downloadDir) {
+      const btn = await page.$('[data-testid=download-preview], button[aria-label="Download"], button:has-text("Download"), button:has-text("ダウンロード")');
+      if (!btn) {
+        out.download = { ok: false, reason: 'ダウンロードボタンが無い' };
+      } else {
+        const [dl] = await Promise.all([page.waitForEvent('download', { timeout }), btn.click()]);
+        const name = dl.suggestedFilename();
+        const path = require('path').join(downloadDir, name);
+        await dl.saveAs(path);
+        out.download = { ok: true, path, name };
+      }
+    }
+  } catch (e) {
+    out.error = String(e && e.message || e).slice(0, 500);
+    out.error_kind = /Timeout/i.test(out.error) ? 'timeout'
+      : /ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION|ERR_TUNNEL|ERR_PROXY/i.test(out.error) ? 'network'
+      : 'browser';
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+  process.stdout.write(JSON.stringify(out));
+})();
+
+====================================================================================================
+# ファイル: src/structlab/exam/discover.py
+====================================================================================================
+"""入力の発見: ローカルフォルダ・Dropbox のファイルと、.url / テキスト内の Box 共有リンク。
+
+元ファイルは読み取りだけ（移動・削除・上書きしない）。Dropbox のファイルは作業フォルダへ複製して読む。
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import links as L
+
+VIDEO = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".wmv"}
+AUDIO = {".mp3", ".m4a", ".wav", ".aac"}
+PDF = {".pdf"}
+OFFICE = {".pptx", ".ppt", ".docx", ".doc", ".odp", ".odt"}
+IMAGE = {".png", ".jpg", ".jpeg", ".heic", ".webp"}
+TRANSCRIPT = {".vtt", ".srt"}
+LINKFILE = {".url", ".webloc"}
+TEXT = {".txt", ".md"}
+SKIP = re.compile(r"(^|/)(\.|~\$|desktop\.ini$|Thumbs\.db$)|\.part$|\.tmp$|\.crdownload$", re.I)
+
+#: ファイル名・フォルダ名から資料の役割を推定する語（強い順）
+ROLE_WORDS = [
+    ("answer", r"模範解答|解答例|解答解説|answer|solution"),
+    ("past_exam", r"過去問|定期試験|期末試験|中間試験|本試験|past[_ -]?exam|exam\d{2,4}"),
+    ("scope", r"試験範囲|出題範囲|範囲の連絡|scope"),
+    ("quiz", r"小テスト|quiz"),
+    ("assignment", r"課題|宿題|レポート課題|assignment|homework"),
+    ("exercise", r"演習|練習問題|例題|exercise|practice"),
+    ("slides", r"スライド|講義資料|配布資料|レジュメ|handout|slide|lecture"),
+]
+
+
+@dataclass
+class Material:
+    id: str                    # 内容の sha256 の先頭 16 桁（同じ内容の重複投入を 1 件にする）
+    name: str
+    kind: str                  # video / audio / pdf / office / image / transcript / linkfile / text / box_link
+    role: str                  # slides / lecture_video / assignment / exercise / past_exam / answer / scope / quiz / other
+    source: str                # 元の場所（local:相対パス / dropbox:/パス / box:URL）
+    local_path: str | None = None
+    size: int | None = None
+    sha256: str | None = None
+    folder: str = ""
+    year: int | None = None
+    also_at: list[str] = field(default_factory=list)  # 同じ内容の別の場所
+    notes: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+def kind_of(name: str) -> str | None:
+    ext = Path(name).suffix.lower()
+    for kind, exts in (("video", VIDEO), ("audio", AUDIO), ("pdf", PDF), ("office", OFFICE), ("image", IMAGE),
+                       ("transcript", TRANSCRIPT), ("linkfile", LINKFILE), ("text", TEXT)):
+        if ext in exts:
+            return kind
+    return None
+
+
+def role_of(path: str, kind: str) -> str:
+    for role, pat in ROLE_WORDS:
+        if re.search(pat, path, re.I):
+            return role
+    return "lecture_video" if kind in ("video", "audio", "box_link") else ("slides" if kind in ("pdf", "office") else "other")
+
+
+def year_of(path: str) -> int | None:
+    m = re.search(r"(20\d{2})(?:年度?|[_\-./ ]|$)", path)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?:令和|R)(\d{1,2})(?:年度?)", path)
+    return 2018 + int(m.group(1)) if m else None
+
+
+def sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+@dataclass
+class Discovery:
+    materials: list[Material] = field(default_factory=list)
+    links: list[L.LinkRecord] = field(default_factory=list)
+    link_logs: list[dict] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)
+    duplicates: list[dict] = field(default_factory=list)
+
+    def add(self, m: Material) -> None:
+        for o in self.materials:
+            if m.sha256 and o.sha256 == m.sha256:
+                o.also_at.append(m.source)
+                self.duplicates.append({"kept": o.source, "duplicate": m.source})
+                return
+        self.materials.append(m)
+
+
+def _register(d: Discovery, local: Path, rel: str, source: str) -> None:
+    kind = kind_of(rel)
+    if kind is None:
+        d.skipped.append({"source": source, "reason": "対応していない形式"})
+        return
+    folder = str(Path(rel).parent).replace("\\", "/")
+    if kind in ("linkfile", "text"):
+        data = local.read_bytes()
+        recs, log = L.extract_links(data, local.name, source)
+        boxes = [r for r in recs if r.kind == "box_shared"]
+        d.link_logs.append(log)
+        d.links += recs
+        if kind == "linkfile" or (boxes and len(data) < 4096 and not _looks_like_document(data)):
+            return  # リンクだけのファイル。資料としては扱わない
+    sha = sha256_file(local)
+    d.add(Material(id=sha[:16], name=Path(rel).name, kind=kind, role=role_of(rel, kind), source=source,
+                   local_path=str(local), size=local.stat().st_size, sha256=sha, folder=folder, year=year_of(rel)))
+
+
+def _looks_like_document(data: bytes) -> bool:
+    text, _ = L.decode_bytes(data)
+    return len(L.URL_IN_TEXT.sub("", text).strip()) > 200
+
+
+def discover_local(root: Path, d: Discovery | None = None) -> Discovery:
+    d = d or Discovery()
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root).as_posix()
+        if not p.is_file() or SKIP.search(rel):
+            continue
+        _register(d, p, rel, f"local:{rel}")
+    return d
+
+
+def discover_dropbox(source, cache_dir: Path, d: Discovery | None = None, max_bytes: int | None = None) -> Discovery:
+    """既存の DropboxSource（読み取り専用）で一覧・取得する。取得物は cache_dir に置く。"""
+    d = d or Discovery()
+    for rf in source.iter_files():
+        if SKIP.search(rf.path) or kind_of(rf.path) is None:
+            continue
+        if max_bytes and rf.size > max_bytes:
+            d.skipped.append({"source": f"dropbox:{rf.path}", "reason": f"サイズ上限超過（{rf.size} バイト）"})
+            continue
+        local = source.fetch(rf, cache_dir / rf.path)
+        _register(d, local, rf.path, f"dropbox:{rf.path}")
+    return d
+
+
+def box_materials(d: Discovery) -> list[Material]:
+    """Box 共有リンクを資料（未取得）として登録する。取得できたら analyze で動画として扱う。"""
+    out = []
+    for r in L.dedupe([x for x in d.links if x.kind == "box_shared"]):
+        folder = str(Path(r.sources[0].split(":", 1)[-1]).parent) if r.sources else ""
+        lid = hashlib.sha256(r.url.encode()).hexdigest()[:16]
+        name = Path(r.sources[0]).stem if r.sources else r.shared_id
+        out.append(Material(id=lid, name=name, kind="box_link", role=role_of(folder + "/" + name, "box_link"),
+                            source=f"box:{r.url}", folder=folder, also_at=r.sources[1:], notes=[]))
+    return out
+
+====================================================================================================
+# ファイル: src/structlab/exam/analyze.py
+====================================================================================================
+"""資料の読み取り。既存の reading（read_pdf / read_video）を使い、出典つきの「単位」に揃える。
+
+単位 = {material, kind: page|speech|scene|text, page, start, end, text, ...}
+読み取り結果は内容のハッシュごとに保存し、同じ資料は読み直さない（差分処理・途中再開）。
+読めなかった部分は coverage に「未読取」として残し、成功扱いにしない。
+"""
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+from .discover import Material
+
+TS = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?")
+
+
+def _ts(s: str) -> float:
+    m = TS.search(s)
+    if not m:
+        raise ValueError(s)
+    h, mi, se, ms = m.groups()
+    return int(h or 0) * 3600 + int(mi) * 60 + int(se) + (int((ms or "0").ljust(3, "0")) / 1000)
+
+
+def parse_subtitles(text: str) -> list[dict]:
+    """.vtt / .srt / 「[mm:ss] 発言」形式の文字起こしを [{start, end, text}] にする。"""
+    out: list[dict] = []
+    blocks = re.split(r"\n\s*\n", text.replace("\r\n", "\n"))
+    for b in blocks:
+        lines = [x for x in b.strip().split("\n") if x.strip()]
+        arrow = next((i for i, x in enumerate(lines) if "-->" in x), None)
+        if arrow is not None:
+            a, _, z = lines[arrow].partition("-->")
+            body = " ".join(lines[arrow + 1:]).strip()
+            if body:
+                out.append({"start": _ts(a), "end": _ts(z), "text": re.sub(r"<[^>]+>", "", body)})
+            continue
+        for x in lines:  # [12:34] 発言 / 12:34 発言
+            m = re.match(r"^\[?((?:\d+:)?\d{1,2}:\d{2})\]?\s+(.+)$", x.strip())
+            if m:
+                out.append({"start": _ts(m.group(1)), "end": None, "text": m.group(2).strip()})
+    for i, s in enumerate(out):
+        if s["end"] is None:
+            s["end"] = out[i + 1]["start"] if i + 1 < len(out) else s["start"] + 5.0
+    return out
+
+
+def _office_to_pdf(src: Path, out_dir: Path) -> Path | None:
+    exe = shutil.which("soffice") or shutil.which("libreoffice")
+    if not exe:
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run([exe, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(src)],
+                       capture_output=True, timeout=600, check=True)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    p = out_dir / (src.stem + ".pdf")
+    return p if p.exists() else None
+
+
+def read_material(m: Material, out_dir: Path, *, ocr=None, transcriber=None, sidecar: Path | None = None,
+                  video_interval: float = 2.0, log=print) -> dict:
+    """1 資料を読み、{units, coverage, raw_kind} を返す。"""
+    from ..reading.pdf_read import read_pdf
+    out_dir.mkdir(parents=True, exist_ok=True)
+    res: dict = {"material": m.id, "units": [], "coverage": {}, "notes": []}
+    src = Path(m.local_path) if m.local_path else None
+    if m.kind == "box_link" or src is None:
+        res["coverage"] = {"status": "未取得", "detail": "動画本体を取得していない（Box の状態を参照）"}
+        return res
+    if m.kind == "office":
+        pdf = _office_to_pdf(src, out_dir / "converted")
+        if pdf is None:
+            if src.suffix.lower() == ".docx":
+                import docx
+                text = "\n".join(p.text for p in docx.Document(str(src)).paragraphs)
+                res["units"].append({"kind": "text", "page": 1, "text": text})
+                res["coverage"] = {"status": "一部", "detail": "LibreOffice が無いため本文だけ読んだ（図・数式は未読取）"}
+                return res
+            res["coverage"] = {"status": "未読取", "detail": "LibreOffice が無く PDF に変換できない"}
+            return res
+        src, kind = pdf, "pdf"
+    else:
+        kind = m.kind
+    if kind == "pdf":
+        r = read_pdf(src, out_dir / "pages", dpi=96)
+        empty = []
+        for p in r["pages"]:
+            text = p["text_layer"].strip()
+            if len(text) < 10 and ocr is not None and ocr.available:
+                text = ocr.image_to_text(Path(p["render"]))
+            if len(text.strip()) < 10:
+                empty.append(p["page"])
+            heading = _heading(p)
+            res["units"].append({"kind": "page", "page": p["page"], "text": text, "heading": heading,
+                                 "render": p["render"]})
+        res["coverage"] = {"status": "完了" if not empty else "一部",
+                           "detail": f"{r['n_pages']} ページ" + (f"、文字が読めないページ {empty}" if empty else ""),
+                           "unread_pages": empty}
+    elif kind == "transcript":
+        speech = parse_subtitles(src.read_text(encoding="utf-8", errors="replace"))
+        res["units"] = [{"kind": "speech", **s} for s in speech]
+        res["coverage"] = {"status": "完了" if speech else "未読取", "detail": f"字幕 {len(speech)} 件",
+                           "audio": "字幕ファイル"}
+    elif kind == "text":
+        text = src.read_text(encoding="utf-8", errors="replace")
+        speech = parse_subtitles(text)
+        if len(speech) >= 3:
+            res["units"] = [{"kind": "speech", **s} for s in speech]
+        else:
+            res["units"] = [{"kind": "text", "page": 1, "text": text}]
+        res["coverage"] = {"status": "完了", "detail": "テキスト"}
+    elif kind == "image":
+        text = ocr.image_to_text(src) if ocr is not None and ocr.available else ""
+        res["units"].append({"kind": "page", "page": 1, "text": text, "heading": text.strip().split("\n")[0][:60]})
+        res["coverage"] = {"status": "完了" if text else "未読取",
+                           "detail": "OCR" if text else "OCR が使えないため画像の文字は未読取"}
+    elif kind in ("video", "audio"):
+        res.update(_read_av(m, src, out_dir, ocr, transcriber, sidecar, video_interval, log))
+    else:
+        res["coverage"] = {"status": "未読取", "detail": f"未対応の形式 {kind}"}
+    return res
+
+
+def _heading(p: dict) -> str:
+    """ページの見出し: 最も大きい文字の行（同じなら上の行）。"""
+    lines = [ln for ln in p.get("lines", []) if ln.get("text", "").strip()]
+    if not lines:
+        return ""
+    size = lambda ln: ln.get("size") or ln.get("font_size") or 0  # noqa: E731
+    best = max(lines[:8], key=lambda ln: (round(size(ln), 1), -lines.index(ln)))
+    return best["text"].strip()[:80]
+
+
+def _read_av(m: Material, src: Path, out_dir: Path, ocr, transcriber, sidecar, interval, log) -> dict:
+    from .. import media
+    from ..reading.video_read import read_video
+    res: dict = {"units": [], "coverage": {}}
+    try:
+        info = media.probe(src)
+    except Exception as e:  # noqa: BLE001
+        return {"units": [], "coverage": {"status": "解析不可", "detail": f"動画を読めない: {str(e)[:150]}"}}
+    cov = {"duration": round(info.duration, 1), "video": "なし", "audio": "なし"}
+    side_speech = parse_subtitles(sidecar.read_text(encoding="utf-8", errors="replace")) if sidecar else []
+    use_asr = transcriber if (transcriber is not None and transcriber.available and not side_speech) else None
+    if info.has_video and m.kind == "video":
+        rec = read_video(src, out_dir / "video", ocr=ocr or media.OCR("none"), transcriber=use_asr,
+                         interval=interval, log=log)
+        for sc in rec["scenes"]:
+            if sc.get("same_as") is None:
+                res["units"].append({"kind": "scene", "start": sc["start"], "end": sc["end"],
+                                     "text": sc.get("ocr", ""), "frame": sc.get("frame"), "scene": sc["index"]})
+        speech = rec["speech"]
+        cov["video"] = f"場面 {rec['n_unique_scenes']} 件" + ("（OCR あり）" if ocr is not None and ocr.available
+                                                           else "（OCR なし: 画面の文字は未読取）")
+    else:
+        speech = []
+        if use_asr is not None and info.has_audio:
+            from ..reading.video_read import audio_profile, transcribe_spans, voiced_spans
+            ap = audio_profile(src, info, info.duration)
+            speech = transcribe_spans(src, out_dir, use_asr, voiced_spans(ap, info.duration), 600.0, ap)
+    if side_speech:
+        speech = side_speech
+        cov["audio"] = f"字幕ファイル {len(side_speech)} 件"
+    elif use_asr is not None and info.has_audio:
+        cov["audio"] = f"文字起こし {len(speech)} 件（{getattr(use_asr, 'model_name', use_asr.name)}）"
+    elif info.has_audio:
+        cov["audio"] = "未解析（文字起こしが無効・未導入）"
+    res["units"] += [{"kind": "speech", "start": s["start"], "end": s["end"], "text": s["text"]} for s in speech]
+    audio_done = not (info.has_audio and cov["audio"].startswith("未解析"))
+    video_done = not (info.has_video and m.kind == "video" and (ocr is None or not ocr.available))
+    cov["status"] = "完了" if audio_done and video_done else ("一部" if audio_done or video_done else "未解析")
+    cov["detail"] = f"映像: {cov['video']} / 音声: {cov['audio']}"
+    res["coverage"] = cov
+    return res
+
+
+def cached_read(m: Material, work: Path, **kw) -> dict:
+    """内容ハッシュで読み取り結果を保存・再利用する（途中停止後は未処理の資料から再開）。"""
+    key = m.sha256 or m.id
+    path = work / "readings" / f"{key[:24]}.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    res = read_material(m, work / "readings" / key[:24], **kw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    return res
+
+====================================================================================================
+# ファイル: src/structlab/exam/text.py
+====================================================================================================
+"""日本語テキストの簡単な処理（形態素解析器に依存しない）。"""
+from __future__ import annotations
+
+import re
+import unicodedata
+from collections import Counter
+
+TERM = re.compile(r"[一-龠々〆ヵヶ]{2,}|[ァ-ヴー]{3,}|[A-Za-z][A-Za-z0-9]{2,}")
+STOP = {"です", "ます", "ください", "について", "ここ", "これ", "それ", "今日", "次回", "前回", "授業", "資料",
+        "スライド", "説明", "問題", "場合", "以下", "以上", "使用", "必要", "可能", "注意", "確認", "部分", "内容",
+        "試験", "テスト", "重要", "覚え", "計算", "理解", "出題", "範囲", "大丈夫", "ページ", "the", "and", "for"}
+#: 式: 等号の両側に記号・数字を含む行（「〜とは＝」のような文章は除く）
+FORMULA = re.compile(r"([A-Za-zα-ωΑ-Ωσετδλμρθφψ][A-Za-z0-9_α-ωΑ-Ω·・^′'()\s]*)\s*[=＝]\s*([^=＝。、]{1,80})")
+
+
+def norm(s: str) -> str:
+    return unicodedata.normalize("NFKC", s or "")
+
+
+def terms(text: str) -> list[str]:
+    return [t for t in TERM.findall(norm(text)) if t not in STOP and not t.isdigit()]
+
+
+def bigrams(text: str) -> set[str]:
+    t = re.sub(r"\s+", "", norm(text))
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def similarity(a: str, b: str) -> float:
+    """文字 2-gram の重なり（短い方に対する割合）。0〜1。"""
+    x, y = bigrams(a), bigrams(b)
+    if not x or not y:
+        return 0.0
+    return len(x & y) / min(len(x), len(y))
+
+
+def top_terms(texts: list[str], n: int = 8) -> list[str]:
+    c = Counter(t for tx in texts for t in set(terms(tx)))
+    return [t for t, _ in c.most_common(n)]
+
+
+def formulas(text: str) -> list[str]:
+    out = []
+    for line in norm(text).split("\n"):
+        line = line.strip()
+        if len(line) > 120 or not FORMULA.search(line):
+            continue
+        if re.search(r"[ぁ-ん]{4,}", line):  # 文章中の「=」は式として扱わない
+            continue
+        out.append(line)
+    return out
+
+
+def sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[。．！？!?])\s*|\n+", norm(text))
+    return [p.strip() for p in parts if len(p.strip()) >= 6]
+
+====================================================================================================
+# ファイル: src/structlab/exam/classify.py
+====================================================================================================
+"""科目・講義回の自動分類。
+
+ファイル名・フォルダ名・資料の表紙と見出し・専門用語・発言を合わせて判定し、
+根拠が弱い・食い違う場合は「要確認」にする。元ファイルは動かさず、結果はメタデータとして持つ。
+"""
+from __future__ import annotations
+
+import re
+from collections import Counter
+from pathlib import PurePosixPath
+
+from . import text as T
+
+UNKNOWN = "要確認"
+GENERIC_FOLDERS = re.compile(
+    r"^(授業動画|動画|録画|資料|講義資料|配布資料|スライド|過去問|課題|演習|小テスト|解答|試験|試験範囲|"
+    r"その他|input|inputs|data|材料|共有|share|shared|video|videos|slides?|docs?|\.|local|dropbox|"
+    r"\d{4}(年度?)?|前期|後期|第?\d+回)$", re.I)
+LECTURE = [
+    (re.compile(r"第\s*(\d{1,2})\s*回"), 3, "「第N回」"),
+    (re.compile(r"(?<![\d])(\d{1,2})\s*回目?"), 2, "「N回」"),
+    (re.compile(r"(?:lec(?:ture)?|class|week)[_\- #]?(\d{1,2})(?!\d)", re.I), 2, "lecture N"),
+    (re.compile(r"#(\d{1,2})(?!\d)"), 1, "#N"),
+    (re.compile(r"^(\d{1,2})(?:[_\-. ]|$)"), 1, "ファイル名先頭の番号"),
+]
+
+
+def lecture_of(name: str, folder: str, head_text: str = "") -> tuple[int | None, str]:
+    for src, s in (("名前", PurePosixPath(name).stem), ("フォルダ", folder), ("表紙", head_text[:300])):
+        for rx, _, label in LECTURE:
+            if src == "表紙" and label in ("#N", "ファイル名先頭の番号"):
+                continue
+            m = rx.search(s)
+            if m and 1 <= int(m.group(1)) <= 30:
+                return int(m.group(1)), f"{src}の{label}"
+    return None, ""
+
+
+def _catalog_hits(cat: list[dict], path: str, text: str) -> list[tuple[float, str, list[str]]]:
+    out = []
+    p = T.norm(path)
+    tx = T.norm(text)
+    for s in cat:
+        names = [s["name"], *s.get("aliases", [])]
+        score, ev = 0.0, []
+        for n in names:
+            if T.norm(n) and T.norm(n) in p:
+                score += 5
+                ev.append(f"ファイル名・フォルダ名に「{n}」")
+                break
+        for n in names:
+            if T.norm(n) and T.norm(n) in tx:
+                score += 3
+                ev.append(f"本文に「{n}」")
+                break
+        kw = [k for k in s.get("keywords", []) if T.norm(k) in tx]
+        if kw:
+            score += min(len(kw), 5) * 1.0  # 専門用語 3 語以上で判定できる
+            ev.append(f"専門用語 {kw[:5]}")
+        for t in s.get("teachers", []):
+            if t in tx or t in p:
+                score += 1.5
+                ev.append(f"教員名「{t}」")
+        if score:
+            out.append((score, s["name"], ev))
+    return sorted(out, reverse=True)
+
+
+def _folder_subject(folder: str) -> str | None:
+    for part in PurePosixPath(folder).parts:
+        part = part.strip()
+        if part and not GENERIC_FOLDERS.match(part) and not re.match(r"^第?\d+回", part):
+            return part
+    return None
+
+
+def classify(materials: list[dict], readings: dict[str, dict], catalog: list[dict]) -> dict[str, dict]:
+    """戻り値: material id → {subject, confidence, evidence, lecture, lecture_evidence}"""
+    out: dict[str, dict] = {}
+    for m in materials:
+        units = readings.get(m["id"], {}).get("units", [])
+        body = " ".join(u.get("text", "") for u in units[:40])
+        head = " ".join(u.get("text", "") for u in units[:2])
+        path = f"{m['folder']}/{m['name']}"
+        hits = _catalog_hits(catalog, path, body)
+        subject, conf, ev = UNKNOWN, "低", []
+        if hits:
+            top = hits[0]
+            second = hits[1][0] if len(hits) > 1 else 0
+            if top[0] >= 3 and top[0] >= second * 1.5:
+                subject, ev = top[1], top[2]
+                conf = "高" if top[0] >= 5 else "中"
+            else:
+                ev = [f"候補が拮抗: {[h[1] for h in hits[:3]]}"]
+        if subject == UNKNOWN:
+            fs = _folder_subject(m["folder"])
+            if fs:
+                subject, conf, ev = fs, "中", ev + [f"フォルダ名「{fs}」"]
+        lec, lev = lecture_of(m["name"], m["folder"], head)
+        out[m["id"]] = {"subject": subject, "confidence": conf, "evidence": ev, "lecture": lec,
+                        "lecture_evidence": lev}
+    _propagate_by_content(materials, readings, out)
+    return out
+
+
+def _propagate_by_content(materials: list[dict], readings: dict[str, dict], out: dict[str, dict]) -> None:
+    """科目が不明の資料を、内容が似ている分類済み資料（同じ用語が多い）に合わせる。"""
+    profile: dict[str, Counter] = {}
+    for m in materials:
+        c = out[m["id"]]
+        if c["subject"] == UNKNOWN:
+            continue
+        txt = " ".join(u.get("text", "") for u in readings.get(m["id"], {}).get("units", []))
+        profile.setdefault(c["subject"], Counter()).update(set(T.terms(txt)))
+    if not profile:
+        return
+    for m in materials:
+        c = out[m["id"]]
+        if c["subject"] != UNKNOWN:
+            continue
+        mine = set(T.terms(" ".join(u.get("text", "") for u in readings.get(m["id"], {}).get("units", []))))
+        if len(mine) < 5:
+            continue
+        scores = sorted(((len(mine & set(p)) / len(mine), s) for s, p in profile.items()), reverse=True)
+        if scores[0][0] >= 0.3 and (len(scores) == 1 or scores[0][0] >= scores[1][0] * 1.5):
+            c.update(subject=scores[0][1], confidence="中",
+                     evidence=c["evidence"] + [f"内容が「{scores[0][1]}」の資料と共通（用語の {scores[0][0]:.0%}）"])
+
+====================================================================================================
+# ファイル: src/structlab/exam/cues.py
+====================================================================================================
+"""教員の発言・資料の記述から出題根拠（手がかり）を見つけ、対象（論点・式・ページ）を特定する。
+
+手がかりの文だけで判断せず、前後の発言・同じ時刻の画面・対応するスライドを文脈として集める。
+「この式は重要」の「この式」が特定できなければ target は None（要確認）のまま残す。
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from . import text as T
+
+
+@dataclass
+class Cue:
+    type: str
+    label: str
+    polarity: str          # + / - / 0
+    strength: int
+    text: str              # 手がかりの文（原文）
+    material: str
+    lecture: int | None = None
+    page: int | None = None
+    start: float | None = None
+    end: float | None = None
+    context: str = ""      # 前後の発言・画面の文字
+    formulas: list[str] = field(default_factory=list)  # 文脈にある式（「この式」の候補）
+    target_topic: str | None = None
+    target_note: str = ""
+    order: float = 0.0     # 時系列（講義回 * 1e5 + 秒）。後の指示が前の指示を上書きするかの判定に使う
+
+    def as_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+def compile_patterns(cfg: dict) -> list[tuple[str, dict, re.Pattern]]:
+    out = []
+    for name, spec in (cfg.get("cues") or {}).items():
+        for p in spec.get("patterns", []):
+            out.append((name, spec, re.compile(p)))
+    return out
+
+
+def find_cues(units: list[dict], material: str, patterns, lecture: int | None = None,
+              window: float = 45.0) -> list[Cue]:
+    """units（1 資料分）から手がかりを探す。同じ文に複数の型が当たれば強い方 1 つ（除外は必ず残す）。"""
+    cues: list[Cue] = []
+    speech = [u for u in units if u["kind"] == "speech"]
+    scenes = [u for u in units if u["kind"] == "scene"]
+    for u in units:
+        if u["kind"] not in ("speech", "page", "text"):
+            continue
+        for sent in (T.sentences(u["text"]) if u["kind"] != "speech" else [T.norm(u["text"])]):
+            hits = [(name, spec) for name, spec, rx in patterns if rx.search(sent)]
+            if not hits:
+                continue
+            neg = [h for h in hits if str(h[1].get("polarity")) == "-"]
+            # 「出ます」と「出ません」の両方に当たる場合は否定を優先する
+            chosen = neg[:1] or sorted(hits, key=lambda h: -int(h[1].get("strength", 1)))[:1]
+            for name, spec in chosen:
+                c = Cue(type=name, label=spec.get("label", name), polarity=str(spec.get("polarity", "+")),
+                        strength=int(spec.get("strength", 1)), text=sent, material=material, lecture=lecture,
+                        page=u.get("page"), start=u.get("start"), end=u.get("end"))
+                if u["kind"] == "speech":
+                    t0 = u["start"]
+                    ctx = [s["text"] for s in speech if t0 - window <= s["start"] <= t0 + window]
+                    scr = [s["text"] for s in scenes if s["start"] - 1 <= t0 <= s["end"] + 1 and s["text"]]
+                    c.context = " ".join(ctx + scr)
+                    c.formulas = [f for s in scr for f in T.formulas(s)]
+                    c.order = (lecture or 0) * 1e5 + t0
+                else:
+                    c.context = u["text"]
+                    c.formulas = T.formulas(u["text"]) if "式" in sent else []
+                    c.order = (lecture or 0) * 1e5 + (u.get("page") or 0)
+                cues.append(c)
+    return cues
+
+
+def resolve_targets(cues: list[Cue], topics: list[dict], slide_for_time=None, min_sim: float = 0.25) -> None:
+    """手がかりを論点に結びつける。
+
+    1) 文中に論点の題名がそのまま出ていれば、その論点（画面より発言の明示を優先）
+    2) 発言の時刻に表示されていたスライド（slide_for_time）があれば、そのページの論点
+    3) 文と前後の文脈が最も似ている論点（しきい値未満なら特定できない）
+    """
+    def score(c, t):
+        title = T.norm(t["title"]).replace(" ", "")
+        if len(title) >= 2 and title in T.norm(c.text).replace(" ", ""):
+            return 1.0 + len(title) / 100  # 論点の題名がその文に出ている（長い題名を優先）
+        s_text = T.similarity(c.text, t["title"] + " " + t["summary"])
+        return max(s_text, 0.6 * T.similarity(c.context, t["title"] + " " + t["summary"]))
+
+    for c in cues:
+        best, how = None, ""
+        scored = sorted(((score(c, t), t["id"]) for t in topics), reverse=True)
+        if scored and scored[0][0] >= 1.0:
+            best, how = scored[0][1], "文中に論点名"
+        if best is None and slide_for_time is not None and c.start is not None:
+            tid = slide_for_time(c.material, c.start)
+            if tid:
+                best, how = tid, "発言時に表示されていたスライドの論点"
+        if best is None and scored and scored[0][0] >= min_sim:
+            best, how = scored[0][1], f"文脈の類似（{scored[0][0]:.2f}）"
+        if c.formulas and "式" in c.text and best is None:
+            how = "式は特定できたが論点に結びつかない"
+        c.target_topic = best
+        c.target_note = how or "対象を特定できない（要確認）"
+
+====================================================================================================
+# ファイル: src/structlab/exam/topics.py
+====================================================================================================
+"""論点の抽出と、論点ごとの根拠（過去問・課題・反復・強調）の照合。
+
+論点 = 配布資料のページ見出し（無ければ動画画面の見出し、さらに無ければ教員の手がかりの文脈）。
+同じ科目で見出しが同じ・内容が近いものはまとめるが、同じ記号の式が食い違うものはまとめない。
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+
+from . import text as T
+
+QUESTION_SPLIT = re.compile(r"(?=(?:^|\n)\s*(?:問\s*\d+|第\s*\d+\s*問|\[\s*\d+\s*\]|【\s*\d+\s*】|[（(]\s*\d+\s*[)）]|\d+\s*[.．]\s))")
+SCOPE_RANGE = re.compile(r"第?\s*(\d{1,2})\s*回?\s*(?:から|〜|~|－|-|―)\s*第?\s*(\d{1,2})\s*回")
+LECTURE_MENTION = re.compile(r"第\s*(\d{1,2})\s*回")
+EMPH_WORDS = re.compile(r"重要|ポイント|注意|必須|頻出|★")
+COVER = re.compile(r"^\s*第\s*\d+\s*回")
+
+
+def _tid(subject: str, title: str, n: int) -> str:
+    return "T" + hashlib.sha1(f"{subject}|{title}|{n}".encode()).hexdigest()[:8]
+
+
+def _lhs(f: str) -> str:
+    return re.split(r"[=＝]", f, maxsplit=1)[0].strip()
+
+
+def _conflicting(fa: list[str], fb: list[str]) -> bool:
+    """同じ左辺で右辺が違う式があれば、別の条件・変更された説明の可能性があるのでまとめない。"""
+    da = {_lhs(f): re.sub(r"\s", "", f) for f in fa}
+    return any(_lhs(f) in da and da[_lhs(f)] != re.sub(r"\s", "", f) for f in fb)
+
+
+def build_topics(subject: str, mats: list[dict], readings: dict[str, dict], cls: dict[str, dict]) -> list[dict]:
+    pages: list[dict] = []
+    for m in mats:
+        if m["role"] in ("past_exam", "answer", "assignment", "exercise", "quiz", "scope"):
+            continue
+        lec = cls[m["id"]]["lecture"]
+        for u in readings.get(m["id"], {}).get("units", []):
+            if u["kind"] in ("page", "text") or (u["kind"] == "scene" and u.get("text", "").strip()):
+                txt = u.get("text", "")
+                head = u.get("heading") or next((x for x in T.norm(txt).split("\n") if len(x.strip()) >= 2), "")
+                if len(T.norm(txt).strip()) < 15:
+                    continue
+                if u.get("page") == 1 and COVER.search(T.norm(head)):
+                    continue  # 表紙（「第3回 …」）は論点にしない
+                pages.append({"material": m["id"], "name": m["name"], "lecture": lec, "kind": u["kind"],
+                              "page": u.get("page"), "start": u.get("start"), "end": u.get("end"),
+                              "heading": T.norm(head).strip()[:60], "text": txt})
+    topics: list[dict] = []
+    for p in pages:
+        f = T.formulas(p["text"])
+        hit = None
+        for t in topics:
+            if T.similarity(p["heading"], t["title"]) >= 0.85 and not _conflicting(t["formulas"], f):
+                hit = t
+                break
+        src = {k: p[k] for k in ("material", "name", "lecture", "kind", "page", "start", "end")}
+        if hit:
+            hit["sources"].append(src)
+            hit["texts"].append(p["text"])
+            hit["formulas"] += [x for x in f if x not in hit["formulas"]]
+            if p["lecture"] and p["lecture"] not in hit["lectures"]:
+                hit["lectures"].append(p["lecture"])
+        else:
+            topics.append({"id": _tid(subject, p["heading"], len(topics)), "subject": subject, "title": p["heading"],
+                           "lectures": [p["lecture"]] if p["lecture"] else [], "sources": [src],
+                           "texts": [p["text"]], "formulas": f})
+    for t in topics:
+        sents = [s for tx in t["texts"] for s in T.sentences(tx)]
+        t["key_sentences"] = sents[:12]
+        t["summary"] = " ".join(sents[:4])[:400]
+        t["terms"] = T.top_terms(t["texts"], 8)
+        t["emphasis"] = bool(EMPH_WORDS.search(" ".join(t["texts"])))
+        t["evidence"] = []
+        t["lectures"].sort()
+    return topics
+
+
+def topic_from_cue(subject: str, cue, n: int) -> dict:
+    """スライドに結びつかない発言（動画だけの授業）から論点を作る。題名は文脈の主な用語。"""
+    terms = T.top_terms([cue.context or cue.text], 4)
+    title = "・".join(terms[:3]) or cue.text[:30]
+    return {"id": _tid(subject, "cue:" + cue.text, n), "subject": subject, "title": title,
+            "lectures": [cue.lecture] if cue.lecture else [], "sources": [
+                {"material": cue.material, "name": "", "lecture": cue.lecture, "kind": "speech",
+                 "page": None, "start": cue.start, "end": cue.end}],
+            "texts": [cue.context or cue.text], "formulas": list(cue.formulas),
+            "key_sentences": T.sentences(cue.context or cue.text)[:8], "summary": (cue.context or cue.text)[:400],
+            "terms": terms, "emphasis": False, "evidence": [], "from_speech_only": True}
+
+
+def split_questions(text: str) -> list[str]:
+    parts = [p.strip() for p in QUESTION_SPLIT.split(T.norm(text)) if len(p.strip()) >= 8]
+    return parts or ([T.norm(text).strip()] if text.strip() else [])
+
+
+def match_topic(q: str, topics: list[dict], min_sim: float = 0.3) -> tuple[dict | None, float]:
+    best, score = None, 0.0
+    for t in topics:
+        body = t["title"] + " " + t["summary"] + " " + " ".join(t["formulas"]) + " " + " ".join(t["terms"])
+        s = max(T.similarity(q, body), 1.2 * T.similarity(q, t["title"]) if len(t["title"]) >= 3 else 0)
+        f_hit = any(re.sub(r"\s", "", f) in re.sub(r"\s", "", q) for f in t["formulas"])
+        s = max(s, 0.9 if f_hit else 0)
+        if s > score:
+            best, score = t, s
+    return (best, score) if score >= min_sim else (None, score)
+
+
+def attach_document_evidence(topics: list[dict], mats: list[dict], readings: dict[str, dict],
+                             cls: dict[str, dict]) -> dict:
+    """過去問・課題・演習・試験範囲の資料を論点に照合する。戻り値: 科目全体の情報（範囲・未照合の設問）"""
+    info: dict = {"scope_lectures": None, "scope_sources": [], "unmatched_questions": [], "past_exam_years": []}
+    for m in mats:
+        role = m["role"]
+        units = readings.get(m["id"], {}).get("units", [])
+        text = "\n".join(u.get("text", "") for u in units if u["kind"] in ("page", "text"))
+        if role == "scope" or "試験範囲" in text[:500]:
+            r = SCOPE_RANGE.search(T.norm(text))
+            if r:
+                lo, hi = sorted((int(r.group(1)), int(r.group(2))))
+                info["scope_lectures"] = list(range(lo, hi + 1))
+                info["scope_sources"].append({"material": m["id"], "name": m["name"], "text": r.group(0)})
+        if role not in ("past_exam", "assignment", "exercise", "quiz"):
+            continue
+        year = m.get("year")
+        if role == "past_exam" and year and year not in info["past_exam_years"]:
+            info["past_exam_years"].append(year)
+        for u in units:
+            if u["kind"] not in ("page", "text"):
+                continue
+            for q in split_questions(u.get("text", "")):
+                t, s = match_topic(q, topics)
+                if t is None:
+                    if role == "past_exam":
+                        info["unmatched_questions"].append({"material": m["name"], "page": u.get("page"),
+                                                            "text": q[:200], "year": year})
+                    continue
+                t["evidence"].append({"type": "past_exam" if role == "past_exam" else "assignment",
+                                      "role": role, "material": m["id"], "name": m["name"], "page": u.get("page"),
+                                      "year": year, "text": q[:300], "match": round(s, 2),
+                                      "basis": "確認済み（資料の照合）"})
+    return info
+
+
+def attach_repetition(topics: list[dict], all_units: list[tuple[str, int | None, dict]]) -> None:
+    """同じ論点が別の講義回・資料・発言に再登場する回数（反復）を数える。"""
+    for t in topics:
+        own = {(s["material"], s.get("page"), s.get("start")) for s in t["sources"]}
+        seen = set()
+        keys = [k for k in t["terms"][:5] if len(k) >= 2]
+        if not keys:
+            continue
+        for mid, lec, u in all_units:
+            if (mid, u.get("page"), u.get("start")) in own:
+                continue
+            txt = T.norm(u.get("text", ""))
+            hits = sum(1 for k in keys if k in txt)
+            if hits >= min(3, len(keys)) or (t["formulas"] and any(
+                    re.sub(r"\s", "", f) in re.sub(r"\s", "", txt) for f in t["formulas"])):
+                seen.add((mid, lec))
+        lectures = {lec for _, lec in seen if lec is not None and lec not in t["lectures"]}
+        t["repetition"] = {"other_places": len(seen), "other_lectures": sorted(lectures)}
+
+====================================================================================================
+# ファイル: src/structlab/exam/scoring.py
+====================================================================================================
+"""出題可能性の判定（S / A / B / C）。
+
+  S  教員が出題を明示した論点（後の授業で取り消されていないもの）
+  A  過去問・頻出の指示・課題・反復などの根拠が比較的強い論点
+  B  可能性はあるが根拠が足りない論点（未解析の資料があり判断できない論点もここに残す）
+  C  出題しないと明示された論点（C-除外）／根拠が乏しい補足（C-低）
+
+点数は根拠ごとの内部点数で、統計的な確率ではない（確率の％表示はしない）。
+未解析の資料がある科目では、根拠が無いことを理由に C にしない（誤除外の防止）。
+"""
+from __future__ import annotations
+
+EXPLICIT = {"exam_explicit", "frequent", "sufficient"}
+FACTOR_LABEL = {"explicit": "出題の明示", "directive": "教員の指示（暗記・重要・計算）", "past_exam": "過去問との一致",
+                "assignment": "課題・演習", "repetition": "反復", "emphasis": "資料上の強調",
+                "problemability": "問題にしやすい内容"}
+DIRECTIVE = {"memorize", "important_formula", "calc_skill", "quiz", "understand"}
+
+
+def score_topic(t: dict, cues: list, info: dict, cfg: dict, unanalyzed: list[dict]) -> dict:
+    w = cfg["scoring"]["weights"]
+    mine = sorted([c for c in cues if c.target_topic == t["id"]], key=lambda c: c.order)
+    factors: dict[str, float] = {}
+    support, against, unknowns = [], [], []
+
+    pos = [c for c in mine if c.polarity == "+"]
+    neg = [c for c in mine if c.polarity == "-"]
+    corr = [c for c in mine if c.polarity == "0"]
+    last_pos = max((c.order for c in pos if c.type in EXPLICIT | DIRECTIVE), default=None)
+    last_neg = max((c.order for c in neg), default=None)
+    excluded = last_neg is not None and (last_pos is None or last_neg > last_pos)
+    explicit = [c for c in pos if c.type in EXPLICIT]
+    directive = [c for c in pos if c.type in DIRECTIVE]
+    if explicit:
+        factors["explicit"] = w["explicit"]
+    if directive:
+        factors["directive"] = w["directive"] * min(len(directive), 2)
+    for c in pos + neg + corr:
+        rec = {"type": "teacher_cue", "cue": c.type, "label": c.label, "text": c.text, "material": c.material,
+               "lecture": c.lecture, "time": c.start, "page": c.page, "basis": "明示（教員の発言・記述）",
+               "target": c.target_note}
+        (support if c.polarity == "+" else against if c.polarity == "-" else unknowns).append(rec)
+    if corr:
+        unknowns.append({"type": "correction", "text": "訂正の発言がある。訂正後の内容を確認すること"})
+
+    past = [e for e in t["evidence"] if e["type"] == "past_exam"]
+    years = sorted({e.get("year") or e["name"] for e in past}, key=str)
+    if past:
+        factors["past_exam"] = w["past_exam"] * len(years)
+    assign = [e for e in t["evidence"] if e["type"] == "assignment"]
+    if assign:
+        factors["assignment"] = w["assignment"]
+    support += past + assign
+
+    rep = t.get("repetition", {})
+    n_rep = len(rep.get("other_lectures", [])) + (1 if rep.get("other_places", 0) >= 2 else 0)
+    n_rep += max(0, len(t["lectures"]) - 1)
+    if n_rep:
+        factors["repetition"] = w["repetition"] * min(n_rep, cfg["scoring"].get("repetition_cap", 3))
+        support.append({"type": "repetition", "text": f"別の講義回・資料にも登場（{n_rep} か所）",
+                        "lectures": rep.get("other_lectures", []), "basis": "推測（出現回数）"})
+    if t.get("emphasis"):
+        factors["emphasis"] = w["emphasis"]
+        support.append({"type": "emphasis", "text": "資料に「重要」等の強調", "basis": "推測（強調表記）"})
+    if t["formulas"] or any(k in t["summary"] for k in ("とは", "定義", "違い", "比較")):
+        factors["problemability"] = w["problemability"]
+    total = round(sum(factors.values()), 2)
+
+    scope = info.get("scope_lectures")
+    out_of_scope = bool(scope and t["lectures"] and not set(t["lectures"]) & set(scope))
+    in_scope = bool(scope and t["lectures"] and set(t["lectures"]) & set(scope))
+    if out_of_scope:
+        against.append({"type": "scope", "text": f"試験範囲（第{scope[0]}〜{scope[-1]}回）の外",
+                        "basis": "明示（試験範囲の告知）"})
+    if in_scope:
+        support.append({"type": "scope", "text": "告知された試験範囲の内（範囲内であることは出題確定ではない）",
+                        "basis": "明示（試験範囲の告知）"})
+    lect_unanalyzed = [u for u in unanalyzed if u.get("lecture") is None or u.get("lecture") in t["lectures"]
+                       or not t["lectures"]]
+    if lect_unanalyzed:
+        unknowns.append({"type": "unanalyzed", "text": f"未解析の資料 {len(lect_unanalyzed)} 件（教員の発言を確認できていない）",
+                         "items": [u["name"] for u in lect_unanalyzed][:5]})
+    if not t["lectures"]:
+        unknowns.append({"type": "lecture_unknown", "text": "講義回が特定できない"})
+
+    a_th, b_th = cfg["scoring"]["a_threshold"], cfg["scoring"]["b_threshold"]
+    if excluded or out_of_scope:
+        grade, sub = "C", "除外"
+        reason = "教員が出題しないと明示（後の訂正なし）" if excluded else "告知された試験範囲の外"
+    elif explicit:
+        grade, sub, reason = "S", "", "教員が出題を明示"
+    elif total >= a_th:
+        grade, sub, reason = "A", "", "根拠の合計が A の基準以上: " + "・".join(FACTOR_LABEL[k] for k in factors)
+    elif total >= b_th or (support and len(support) > (1 if t.get("emphasis") else 0)):
+        grade, sub, reason = "B", "", "根拠はあるが不足: " + ("・".join(FACTOR_LABEL[k] for k in factors) or "弱い根拠のみ")
+    elif lect_unanalyzed:
+        grade, sub, reason = "B", "要確認", "根拠が見つからないが、未解析の資料があるため C にしない"
+    else:
+        grade, sub, reason = "C", "低", "出題根拠が見つからない（解析済みの資料の範囲で）"
+    confidence = "高" if (grade == "S" or (grade == "C" and sub == "除外")) else (
+        "中" if grade == "A" and (past or explicit or directive) else "低")
+    if lect_unanalyzed and confidence == "高" and grade != "S":
+        confidence = "中"
+    return {"grade": grade, "sub": sub, "score": total, "factors": factors, "reason": reason,
+            "confidence": confidence, "support": support, "against": against, "unknowns": unknowns,
+            "past_exam_years": years}
+
+
+def apply_overrides(t: dict, j: dict, overrides: dict) -> dict:
+    """利用者による手動修正（configs/exam_overrides.yaml）。理由と元の判定を残す。"""
+    o = overrides.get(t["id"]) or overrides.get(t["title"])
+    if not o:
+        return j
+    j = dict(j)
+    j["auto_grade"] = j["grade"]
+    j["grade"] = o["grade"]
+    j["reason"] = f"手動修正: {o.get('reason', '理由の記載なし')}（自動判定は {j['auto_grade']}）"
+    j["overridden"] = True
+    return j
+
+====================================================================================================
+# ファイル: src/structlab/exam/questions.py
+====================================================================================================
+"""S・A の論点から予想問題・解答解説・模擬テストを作る（外部 AI を使わない規則ベース）。
+
+- 計算問題: 資料の式を sympy で解き、代入した値で検算する。数値はシステムが設定した例題の値（資料の値ではない）
+- 穴埋め・選択・正誤・記述: 資料の文をそのまま使い、資料に無い内容を足さない
+- 採点基準・配点・試験時間は不明なので「推定」「仮設定」と明記する
+"""
+from __future__ import annotations
+
+import hashlib
+import random
+import re
+
+from . import text as T
+
+GREEK = {"α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon", "θ": "theta", "λ": "lambda_",
+         "μ": "mu", "ρ": "rho", "σ": "sigma", "τ": "tau", "φ": "phi", "ψ": "psi", "ω": "omega", "Δ": "Delta"}
+SUP = str.maketrans({"²": "**2", "³": "**3"})
+
+
+def _seed(*parts) -> random.Random:
+    return random.Random(int(hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()[:8], 16))
+
+
+def parse_formula(f: str):
+    """「σ = M / Z」→ (sympy の式, 左辺の記号, {記号名: 元の表記})。解釈できなければ None。"""
+    import sympy as sp
+    from sympy.parsing.sympy_parser import (convert_xor, implicit_multiplication_application,
+                                            parse_expr, standard_transformations)
+    f = T.norm(f.translate(SUP)).split("。")[0]  # 上付き数字は正規化（²→2）の前に累乗へ直す
+    if f.count("=") != 1:
+        return None
+    lhs, rhs = (x.strip() for x in f.split("="))
+    rhs = re.split(r"\s{2,}|[（(][^)）]*単位|\[", rhs)[0].strip()
+    if not lhs or not rhs or re.search(r"[ぁ-んァ-ン一-龠]", lhs + rhs):
+        return None
+    if re.search(r"[A-Za-zα-ω]\d", lhs + " " + rhs):
+        # 「bh2」が bh² か添字つきの記号か、文字だけでは区別できない。誤った計算問題を作らない
+        return None
+    names: dict[str, str] = {}
+
+    def conv(s: str) -> str:
+        s = s.translate(SUP).replace("×", "*").replace("・", "*").replace("÷", "/").replace("√", "sqrt")
+        for g, n in GREEK.items():
+            if g in s:
+                names[n] = g
+                s = s.replace(g, f" {n} ")
+        return s
+
+    tr = standard_transformations + (implicit_multiplication_application, convert_xor)
+    # E・I・S・N などを sympy の定数（ネイピア数・虚数単位など）ではなく記号として読む
+    local = {c: sp.Symbol(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"}
+    try:
+        L = parse_expr(conv(lhs), local_dict=local, transformations=tr)
+        R = parse_expr(conv(rhs), local_dict=local, transformations=tr)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(L, sp.Symbol) or len(R.free_symbols) < 1 or L in R.free_symbols:
+        return None
+    return sp.Eq(L, R), L, names
+
+
+def symbol_meanings(sym_names: list[str], text: str) -> dict[str, dict]:
+    out = {}
+    t = T.norm(text)
+    for n in sym_names:
+        m = re.search(rf"(?<![A-Za-z]){re.escape(n)}\s*[:：はを]\s*([^\s,、。:：=]{{2,20}})(?:\s*[\[［(（]\s*([^\]］)）]{{1,12}})\s*[\]］)）])?", t)
+        out[n] = {"meaning": m.group(1) if m else None, "unit": (m.group(2) if m and m.group(2) else None)}
+    return out
+
+
+def _display(sym, names: dict) -> str:
+    return names.get(sym.name, sym.name)
+
+
+def calc_questions(topic: dict, variant: int = 0, salt: str = "") -> list[dict]:
+    import sympy as sp
+    qs = []
+    for fi, f in enumerate(topic["formulas"][:3]):
+        parsed = parse_formula(f)
+        if not parsed:
+            continue
+        eq, lhs, names = parsed
+        syms = sorted(eq.rhs.free_symbols, key=lambda s: s.name)
+        means = symbol_meanings([_display(s, names) for s in [lhs, *syms]], " ".join(topic["texts"]))
+        rng = _seed(topic["id"], fi, variant, salt)
+        target = lhs
+        if variant and syms:  # 条件変更: 別の記号を求めさせる
+            target = syms[(variant - 1) % len(syms)]
+        known = [s for s in [lhs, *syms] if s != target]
+        vals = {}
+        for s in known:
+            vals[s] = sp.Integer(rng.choice([2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 40, 50, 100]))
+        try:
+            sol = sp.solve(eq.subs({k: v for k, v in vals.items()}), target)
+        except Exception:  # noqa: BLE001
+            continue
+        sol = [x for x in sol if x.is_real and (x.is_positive or x.is_zero is False)]
+        if not sol:
+            continue
+        ans = sp.nsimplify(sol[0])
+        check = sp.simplify(eq.lhs.subs({**vals, target: ans}) - eq.rhs.subs({**vals, target: ans})) == 0
+        disp = lambda s: _display(s, names)  # noqa: E731
+        unit = lambda s: (f" {means[disp(s)]['unit']}" if means.get(disp(s), {}).get("unit") else "")  # noqa: E731
+        given = "、".join(f"{disp(s)} = {vals[s]}{unit(s)}" for s in known)
+        mean_lines = [f"{k}: {v['meaning'] or '（資料で意味を確認できない記号）'}"
+                      + (f" [{v['unit']}]" if v["unit"] else "") for k, v in means.items()]
+        steps = [f"使う式: {f}", f"与えられた値: {given}"]
+        if target != lhs:
+            back = {sp.Symbol(k): sp.Symbol(v) for k, v in names.items()}
+            steps.append(f"{disp(target)} について解く: {disp(target)} = {sp.solve(eq, target)[0].subs(back)}"
+                         .replace("**", "^"))
+        steps.append(f"代入して計算: {disp(target)} = {ans}" + (f" ≈ {float(ans):.4g}" if not ans.is_Integer else ""))
+        steps.append("Python（sympy）で、求めた値を元の式に代入して両辺が一致することを確認した" if check
+                     else "検算で不一致（要確認）")
+        qs.append({
+            "type": "calc", "topic": topic["id"], "variant": variant,
+            "prompt": f"{topic['title']}について、式 {f} を用いる。{given} のとき、{disp(target)} を求めよ。",
+            "answer": f"{disp(target)} = {ans}" + (f"（≈ {float(ans):.4g}）" if not ans.is_Integer else "")
+                      + unit(target),
+            "steps": steps, "symbols": mean_lines,
+            "mistakes": ["式の変形で分母・分子を取り違える", "単位をそろえずに代入する（資料の単位を確認）"],
+            "note": "数値はシステムが設定した例題の値（資料・試験の値ではない）", "verified": bool(check),
+            "formula": f, "unit_known": bool(unit(target)),
+        })
+    return qs
+
+
+def fill_question(topic: dict) -> dict | None:
+    for s in topic["key_sentences"]:
+        for term in topic["terms"]:
+            if term in s and len(s) <= 120 and s.count(term) == 1:
+                return {"type": "fill", "topic": topic["id"],
+                        "prompt": f"次の文の空欄に当てはまる語句を答えよ。\n「{s.replace(term, '（　　　）')}」",
+                        "answer": term, "explanation": f"資料の記述: 「{s}」", "source_sentence": s}
+    return None
+
+
+def choice_question(topic: dict, others: list[dict]) -> dict | None:
+    correct = next((s for s in topic["key_sentences"] if 10 <= len(s) <= 90), None)
+    if not correct or not others:
+        return None
+    distract = []
+    for o in others:
+        s = next((x for x in o["key_sentences"] if 10 <= len(x) <= 90 and topic["title"] not in x), None)
+        if s and T.similarity(s, correct) < 0.5:
+            distract.append((s, o["title"]))
+        if len(distract) == 3:
+            break
+    if len(distract) < 2:
+        return None
+    rng = _seed(topic["id"], "choice")
+    opts = [(correct, None)] + distract
+    rng.shuffle(opts)
+    labels = "アイウエ"
+    k = next(i for i, (s, _) in enumerate(opts) if s == correct)
+    expl = [f"{labels[i]}: " + ("正しい（資料の記述どおり）" if o is None else f"誤り。これは「{o}」についての記述")
+            for i, (_, o) in enumerate(opts)]
+    return {"type": "choice", "topic": topic["id"],
+            "prompt": f"「{topic['title']}」についての記述として正しいものを一つ選べ。\n"
+                      + "\n".join(f"{labels[i]}. {s}" for i, (s, _) in enumerate(opts)),
+            "answer": labels[k], "explanation": "\n".join(expl)}
+
+
+def tf_question(topic: dict) -> dict | None:
+    for s in topic["key_sentences"]:
+        m = re.search(r"(?<![\d.])(\d+(?:\.\d+)?)(?![\d.])", s)
+        if not m or len(s) > 100:
+            continue
+        v = m.group(1)
+        wrong = str(int(float(v) * 2)) if float(v) >= 1 and "." not in v else str(round(float(v) * 2, 3))
+        if wrong == v:
+            continue
+        rng = _seed(topic["id"], "tf")
+        use_wrong = rng.random() < 0.5
+        stmt = s[:m.start()] + wrong + s[m.end():] if use_wrong else s
+        return {"type": "tf", "topic": topic["id"], "prompt": f"次の記述の正誤を答えよ。\n「{stmt}」",
+                "answer": "誤" if use_wrong else "正",
+                "explanation": (f"資料では「{v}」（{wrong} ではない）。資料の記述: 「{s}」" if use_wrong
+                                else f"資料の記述どおり: 「{s}」")}
+    return None
+
+
+def essay_question(topic: dict) -> dict:
+    keys = topic["terms"][:5]
+    return {"type": "essay", "topic": topic["id"],
+            "prompt": f"「{topic['title']}」について、授業の内容に沿って説明せよ。",
+            "answer": " ".join(topic["key_sentences"][:3]) or topic["summary"],
+            "short_answer": (topic["key_sentences"][0] if topic["key_sentences"] else topic["summary"][:80]),
+            "keywords": keys,
+            "explanation": "採点基準は公表されていないため推定: キーワード " + "・".join(keys) + " を含め、資料の説明に沿っているか",
+            "basis": "推定"}
+
+
+def questions_for(topic: dict, others: list[dict], variant: int = 0, salt: str = "") -> list[dict]:
+    qs = calc_questions(topic, variant, salt)
+    for fn in (fill_question, tf_question):
+        q = fn(topic)
+        if q:
+            qs.append(q)
+    q = choice_question(topic, others)
+    if q:
+        qs.append(q)
+    qs.append(essay_question(topic))
+    for i, q in enumerate(qs):
+        q["id"] = f"{topic['id']}-{q['type']}-{variant}{salt}-{i}"
+        q["topic_title"] = topic["title"]
+    return qs
+
+
+KIND_ORDER = {"calc": 0, "fill": 1, "choice": 2, "tf": 3, "essay": 4}
+
+
+def mock_exams(selected: list[dict], judgments: dict[str, dict], past_info: dict) -> list[dict]:
+    """模擬テスト 3 回分。selected = S・A の論点（重要度順）"""
+    if not selected:
+        return []
+    by_id = {t["id"]: t for t in selected}
+    others = lambda t: [o for o in selected if o["id"] != t["id"]]  # noqa: E731
+    n = max(5, min(10, len(selected) * 2))
+
+    def pick(order: list[dict], variant: int, prefer: list[str], limit: int, salt: str = "") -> list[dict]:
+        out, used = [], set()
+        per = max(1, -(-limit // len(order)))  # 論点が少ないときは 1 論点から形式を変えて複数問
+        for t in order:
+            qs = sorted(questions_for(t, others(t), variant, salt), key=lambda q: (prefer.index(q["type"])
+                                                                               if q["type"] in prefer else 9))
+            for q in qs[:per + (1 if judgments[t["id"]]["grade"] == "S" else 0)]:
+                if q["prompt"] not in used:
+                    out.append(q)
+                    used.add(q["prompt"])
+            if len(out) >= limit:
+                break
+        return out[:limit]
+
+    core = sorted(selected, key=lambda t: (judgments[t["id"]]["grade"] != "S", -judgments[t["id"]]["score"]))
+    past = sorted(selected, key=lambda t: (-len(judgments[t["id"]].get("past_exam_years", [])),
+                                           -judgments[t["id"]]["score"]))
+    calc_share = past_info.get("calc_share")
+    prefer2 = ["calc", "fill", "essay", "choice", "tf"] if (calc_share or 0.5) >= 0.5 else \
+        ["essay", "fill", "choice", "calc", "tf"]
+    exams = [
+        {"no": 1, "title": "模擬テスト 第1回（最重要問題集中型）", "questions": pick(core, 0, ["calc", "fill", "essay"], n),
+         "design": "S と A の上位を中心に、基本の解法・用語を確認する"},
+        {"no": 2, "title": "模擬テスト 第2回（本番出題予測型）", "questions": pick(past, 0, prefer2, n, salt="m2"),
+         "design": ("過去問の出題形式（計算の割合 " + (f"{calc_share:.0%}" if calc_share is not None else "不明")
+                    + "）と過去問に一致した論点を優先") if past_info.get("past_exam_years")
+         else "過去問が無いため、S・A の重要度順に本番に近い形式の配分（仮）で構成"},
+        {"no": 3, "title": "模擬テスト 第3回（別パターン・応用型）", "questions": pick(core, 1, ["calc", "choice", "tf", "essay"], n),
+         "design": "同じ重要論点を、数値・求める量・問い方を変えて出題する"},
+    ]
+    for ex in exams:
+        k = len(ex["questions"]) or 1
+        base = 100 // k
+        for i, q in enumerate(ex["questions"]):
+            q = ex["questions"][i] = dict(q)
+            q["number"] = i + 1
+            q["points"] = base + (1 if i < 100 - base * k else 0)
+            q["grade"] = judgments[q["topic"]]["grade"]
+        ex["time_minutes"] = 60
+        ex["provisional"] = "試験時間・配点は根拠が無いため仮設定"
+        ex["topics"] = sorted({q["topic"] for q in ex["questions"]})
+        ex["topic_titles"] = [by_id[t]["title"] for t in ex["topics"]]
+    return exams
+
+====================================================================================================
+# ファイル: src/structlab/exam/materials.py
+====================================================================================================
+"""教材の内容データ（ブロックの列）を作る。見た目は render.py が決める。
+
+S・A の論点だけを詳しく扱い、B・C は判定一覧に題名と理由だけを載せる。
+"""
+from __future__ import annotations
+
+GRADE_LABEL = {"S": "S（出題明示）", "A": "A（出題有力）", "B": "B（根拠不足）", "C": "C（対象外・低優先）"}
+TYPE_LABEL = {"calc": "計算", "fill": "穴埋め", "choice": "選択", "tf": "正誤", "essay": "記述"}
+
+
+def fmt_time(sec) -> str:
+    if sec is None:
+        return ""
+    sec = int(sec)
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
+
+
+def fmt_source(s: dict, names: dict) -> str:
+    name = s.get("name") or names.get(s.get("material"), s.get("material", ""))
+    lec = f"第{s['lecture']}回 " if s.get("lecture") else ""
+    if s.get("page"):
+        return f"{lec}{name} p.{s['page']}"
+    if s.get("start") is not None:
+        return f"{lec}{name} {fmt_time(s['start'])}"
+    return f"{lec}{name}"
+
+
+def _warn_blocks(ctx: dict) -> list[dict]:
+    out = []
+    if ctx["unanalyzed"]:
+        out.append({"t": "small", "text": "【注意】未解析の資料があります。この資料の判定は、その資料内の教員の発言を含んでいません: "
+                    + "、".join(f"{u['name']}（{u['why']}）" for u in ctx["unanalyzed"][:6])})
+    sa = [t for t in ctx["topics"] if ctx["j"][t["id"]]["grade"] in "SA"]
+    if len(sa) <= 2:
+        out.append({"t": "small", "text": f"【注意】S・A の論点が {len(sa)} 件と少ないため、範囲を絞りすぎている可能性があります。"
+                    "判定一覧の B（特に「要確認」）も確認してください。"})
+    return out
+
+
+def doc_summary(ctx: dict) -> list[dict]:
+    b = [{"t": "title", "text": f"{ctx['subject']}　最重要事項シート"},
+         {"t": "small", "text": "S・A と判定した論点だけを載せています。出題の確率ではなく、根拠の強さによる分類です。"}]
+    b += _warn_blocks(ctx)
+    for t in ctx["selected"]:
+        j = ctx["j"][t["id"]]
+        b.append({"t": "h1", "text": f"［{j['grade']}］{t['title']}"})
+        b.append({"t": "small", "text": f"判定理由: {j['reason']}"})
+        if t["key_sentences"]:
+            b.append({"t": "h2", "text": "必ず押さえる内容"})
+            b.append({"t": "list", "items": t["key_sentences"][:3]})
+        if t["formulas"]:
+            b.append({"t": "h2", "text": "重要公式"})
+            b.append({"t": "list", "items": t["formulas"][:4]})
+        calc = next((q for q in ctx["questions"][t["id"]] if q["type"] == "calc"), None)
+        if calc:
+            b.append({"t": "h2", "text": "典型解法"})
+            b.append({"t": "list", "items": calc["steps"][:-1]})
+            b.append({"t": "h2", "text": "よくあるミス"})
+            b.append({"t": "list", "items": calc["mistakes"]})
+        if t["terms"]:
+            b.append({"t": "p", "text": "記述のキーワード: " + "・".join(t["terms"][:6])})
+    return b
+
+
+def doc_deep(ctx: dict) -> list[dict]:
+    names = ctx["names"]
+    b = [{"t": "title", "text": f"{ctx['subject']}　徹底対策資料"}]
+    b += _warn_blocks(ctx)
+    for t in ctx["selected"]:
+        j = ctx["j"][t["id"]]
+        b.append({"t": "h1", "text": f"［{GRADE_LABEL[j['grade']]}］{t['title']}"})
+        b.append({"t": "small", "text": "授業での位置: " + "／".join(fmt_source(s, names) for s in t["sources"][:5])})
+        b.append({"t": "h2", "text": "出題根拠"})
+        b.append({"t": "list", "items": [f"{e.get('label') or e['type']}: {e.get('text', '')[:120]}（{e.get('basis', '')}）"
+                                         for e in j["support"][:6]] or ["（強い根拠なし）"]})
+        if j["unknowns"]:
+            b.append({"t": "small", "text": "未確認: " + "／".join(u["text"] for u in j["unknowns"])})
+        b.append({"t": "h2", "text": "内容"})
+        b.append({"t": "list", "items": t["key_sentences"][:8] or [t["summary"]]})
+        qs = ctx["questions"][t["id"]]
+        for q in [q for q in qs if q["type"] == "calc"][:2]:
+            b.append({"t": "h2", "text": f"公式と計算: {q['formula']}"})
+            b.append({"t": "list", "items": q["symbols"]})
+            b.append({"t": "p", "text": "例題: " + q["prompt"]})
+            b.append({"t": "pre", "text": "\n".join(q["steps"])})
+            b.append({"t": "p", "text": "答え: " + q["answer"]})
+            b.append({"t": "small", "text": q["note"]})
+        types = sorted({TYPE_LABEL[q["type"]] for q in qs})
+        b.append({"t": "small", "text": "想定される出題形式: " + "・".join(types)})
+    return b
+
+
+def doc_formulas(ctx: dict) -> list[dict]:
+    rows = [["公式", "記号の意味・単位", "論点", "出典"]]
+    for t in ctx["selected"]:
+        for q in [q for q in ctx["questions"][t["id"]] if q["type"] == "calc"]:
+            rows.append([q["formula"], "\n".join(q["symbols"]), t["title"], fmt_source(t["sources"][0], ctx["names"])])
+        for f in t["formulas"]:
+            if not any(r[0] == f for r in rows):
+                rows.append([f, "（式を自動で解釈できない: 資料で確認）", t["title"], fmt_source(t["sources"][0], ctx["names"])])
+    b = [{"t": "title", "text": f"{ctx['subject']}　公式一覧"}]
+    if len(rows) == 1:
+        b.append({"t": "p", "text": "S・A の論点に公式はありませんでした。"})
+    else:
+        b.append({"t": "table", "rows": rows})
+    return b
+
+
+def _q_text(q: dict, n: int, points: bool = False) -> list[dict]:
+    head = f"問{n}" + (f"（{q['points']}点）" if points and q.get("points") else "") + f"［{TYPE_LABEL[q['type']]}］"
+    return [{"t": "h2", "text": head}, {"t": "p", "text": q["prompt"]}]
+
+
+def doc_questions(title: str, qs: list[dict], meta: str = "", points: bool = False) -> list[dict]:
+    b = [{"t": "title", "text": title}]
+    if meta:
+        b.append({"t": "small", "text": meta})
+    for i, q in enumerate(qs, 1):
+        b += _q_text(q, i, points)
+    return b
+
+
+def doc_answer_sheet(title: str, qs: list[dict]) -> list[dict]:
+    b = [{"t": "title", "text": title}, {"t": "p", "text": "学籍番号（　　　　　　　）　氏名（　　　　　　　　　　）"}]
+    for i, q in enumerate(qs, 1):
+        b.append({"t": "h2", "text": f"問{i}"})
+        b.append({"t": "space", "lines": {"calc": 7, "essay": 8, "fill": 2, "choice": 1, "tf": 1}[q["type"]]})
+    return b
+
+
+def doc_solutions(title: str, qs: list[dict], ctx: dict, show_grade: bool = True) -> list[dict]:
+    b = [{"t": "title", "text": title}]
+    for i, q in enumerate(qs, 1):
+        j = ctx["j"][q["topic"]]
+        t = ctx["by_id"][q["topic"]]
+        b.append({"t": "h2", "text": f"問{i}　{q['topic_title']}" + (f"［重要度 {j['grade']}］" if show_grade else "")})
+        b.append({"t": "p", "text": "解答: " + q["answer"]})
+        if q.get("steps"):
+            b.append({"t": "pre", "text": "\n".join(q["steps"])})
+        if q.get("explanation"):
+            b.append({"t": "pre", "text": q["explanation"]})
+        if q.get("short_answer"):
+            b.append({"t": "p", "text": "短い解答: " + q["short_answer"]})
+        if q.get("note"):
+            b.append({"t": "small", "text": q["note"]})
+        b.append({"t": "small", "text": "根拠: " + j["reason"] + "／出典: " + fmt_source(t["sources"][0], ctx["names"])})
+    return b
+
+
+def doc_judgments(ctx: dict) -> list[dict]:
+    rows = [["判定", "論点", "講義回", "理由", "未確認"]]
+    order = {"S": 0, "A": 1, "B": 2, "C": 3}
+    for t in sorted(ctx["topics"], key=lambda t: (order[ctx["j"][t["id"]]["grade"]], -ctx["j"][t["id"]]["score"])):
+        j = ctx["j"][t["id"]]
+        rows.append([j["grade"] + (f"-{j['sub']}" if j["sub"] else ""), t["title"],
+                     ",".join(map(str, t["lectures"])) or "不明", j["reason"],
+                     "／".join(u["text"] for u in j["unknowns"])[:80]])
+    b = [{"t": "title", "text": f"{ctx['subject']}　出題予測の判定一覧"},
+         {"t": "small", "text": "S: 出題明示 / A: 出題有力 / B: 根拠不足（要確認を含む） / C-除外: 出題しないと明示・範囲外 / C-低: 根拠なし。"
+          "点数は根拠の内部点数で、確率ではありません。"}]
+    b += _warn_blocks(ctx)
+    b.append({"t": "table", "rows": rows})
+    if ctx["info"].get("unmatched_questions"):
+        b.append({"t": "h2", "text": "どの論点にも照合できなかった過去問の設問"})
+        b.append({"t": "list", "items": [f"{u['material']} p.{u['page']}: {u['text'][:80]}"
+                                         for u in ctx["info"]["unmatched_questions"][:15]]})
+    return b
+
+====================================================================================================
+# ファイル: src/structlab/exam/render.py
+====================================================================================================
+"""文書出力（PDF・Word）と品質検査。内容はブロックの列で受け取り、見た目はここだけで決める。
+
+ブロック: {"t": "title"|"h1"|"h2"|"p"|"small"|"pre"|"list"|"table"|"space"|"break", ...}
+  p/small/pre: text   list: items   table: rows（1 行目が見出し）   space: lines（解答欄の行数）
+白背景・黒文字・標準的な日本語書体。日本語フォントは埋め込む（環境に無ければ CID フォント）。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf",
+    "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
+    "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+]
+_FONT: str | None = None
+
+
+def jp_font() -> str:
+    global _FONT
+    if _FONT:
+        return _FONT
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
+    for p in FONT_CANDIDATES:
+        if Path(p).exists():
+            try:
+                pdfmetrics.registerFont(TTFont("JP", p, subfontIndex=0) if p.endswith(".ttc") else TTFont("JP", p))
+                _FONT = "JP"
+                return _FONT
+            except Exception:  # noqa: BLE001
+                continue
+    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
+    _FONT = "HeiseiKakuGo-W5"
+    return _FONT
+
+
+def _esc(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>"))
+
+
+def to_pdf(blocks: list[dict], path: Path, title: str, header: str = "") -> Path:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table,
+                                    TableStyle)
+    f = jp_font()
+    st = {
+        "title": ParagraphStyle("title", fontName=f, fontSize=16, leading=22, alignment=TA_CENTER, spaceAfter=8),
+        "h1": ParagraphStyle("h1", fontName=f, fontSize=13, leading=18, spaceBefore=8, spaceAfter=4),
+        "h2": ParagraphStyle("h2", fontName=f, fontSize=11.5, leading=16, spaceBefore=6, spaceAfter=2),
+        "p": ParagraphStyle("p", fontName=f, fontSize=10, leading=15, wordWrap="CJK"),
+        "small": ParagraphStyle("small", fontName=f, fontSize=8.5, leading=12, wordWrap="CJK"),
+        "pre": ParagraphStyle("pre", fontName=f, fontSize=9.5, leading=14, wordWrap="CJK", leftIndent=8),
+    }
+    story = []
+    for b in blocks:
+        t = b["t"]
+        if t in st:
+            story.append(Paragraph(_esc(b.get("text", "")), st[t]))
+        elif t == "list":
+            for it in b["items"]:
+                story.append(Paragraph("・" + _esc(it), st["p"]))
+        elif t == "table":
+            rows = [[Paragraph(_esc(c), st["small"]) for c in r] for r in b["rows"]]
+            tb = Table(rows, repeatRows=1, colWidths=b.get("widths"))
+            tb.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.black),
+                                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                                    ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+            story.append(tb)
+        elif t == "space":
+            n = int(b.get("lines", 4))
+            box = Table([[""]] * n, colWidths=[170 * mm], rowHeights=[8 * mm] * n)
+            box.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.grey),
+                                     ("BOX", (0, 0), (-1, -1), 0.6, colors.black)]))
+            story.append(KeepTogether([box]))
+        elif t == "break":
+            story.append(PageBreak())
+        story.append(Spacer(1, 2 if t in ("list", "p") else 4))
+
+    def footer(c, d):
+        c.saveState()
+        c.setFont(f, 8)
+        c.drawCentredString(A4[0] / 2, 10 * mm, f"- {d.page} -")
+        if header:
+            c.drawString(15 * mm, A4[1] - 10 * mm, header)
+        c.restoreState()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = SimpleDocTemplate(str(path), pagesize=A4, title=title, leftMargin=18 * mm, rightMargin=18 * mm,
+                            topMargin=18 * mm, bottomMargin=18 * mm)
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return path
+
+
+def to_docx(blocks: list[dict], path: Path, title: str) -> Path:
+    import docx
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+    d = docx.Document()
+    style = d.styles["Normal"]
+    style.font.name = "IPAGothic"
+    style.element.rPr.rFonts.set(qn("w:eastAsia"), "IPAゴシック")
+    style.font.size = Pt(10.5)
+    d.core_properties.title = title
+    for b in blocks:
+        t = b["t"]
+        if t == "title":
+            p = d.add_heading(b["text"], level=0)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        elif t == "h1":
+            d.add_heading(b["text"], level=1)
+        elif t == "h2":
+            d.add_heading(b["text"], level=2)
+        elif t in ("p", "pre", "small"):
+            p = d.add_paragraph(b["text"])
+            if t == "small":
+                for r in p.runs:
+                    r.font.size = Pt(8.5)
+        elif t == "list":
+            for it in b["items"]:
+                d.add_paragraph(it, style="List Bullet")
+        elif t == "table":
+            rows = b["rows"]
+            tb = d.add_table(rows=len(rows), cols=len(rows[0]))
+            tb.style = "Table Grid"
+            for i, r in enumerate(rows):
+                for j, c in enumerate(r):
+                    tb.cell(i, j).text = str(c)
+        elif t == "space":
+            for _ in range(int(b.get("lines", 4))):
+                d.add_paragraph("_" * 60)
+        elif t == "break":
+            d.add_page_break()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    d.save(str(path))
+    return path
+
+
+def check_pdf(path: Path, expect: list[str] = (), render_dir: Path | None = None) -> dict:
+    """PDF の品質検査: 開けるか・各ページに文字があるか・文字化け（置換文字）・期待する文の有無・ページ番号。"""
+    import pymupdf
+    res = {"file": path.name, "ok": True, "problems": []}
+    try:
+        doc = pymupdf.open(str(path))
+    except Exception as e:  # noqa: BLE001
+        return {"file": path.name, "ok": False, "problems": [f"開けない: {e}"]}
+    with doc:
+        res["pages"] = doc.page_count
+        texts = [p.get_text() for p in doc]
+        fonts = {f[3] for p in doc for f in p.get_fonts()}
+        if render_dir is not None and doc.page_count:
+            render_dir.mkdir(parents=True, exist_ok=True)
+            doc[0].get_pixmap(dpi=60).save(str(render_dir / (path.stem + "_p1.png")))
+    allt = "".join(texts)
+    if not res["pages"]:
+        res["problems"].append("ページが無い")
+    empty = [i + 1 for i, t in enumerate(texts) if not t.strip()]
+    if empty:
+        res["problems"].append(f"文字の無いページ {empty}")
+    if "�" in allt:
+        res["problems"].append("置換文字（文字化け）がある")
+    flat = allt.replace("\n", "").replace(" ", "")
+    missing = [e for e in expect if e.replace("\n", "").replace(" ", "") not in flat]
+    if missing:
+        res["problems"].append(f"期待する文が見つからない: {missing[:3]}")
+    if texts and "- 1 -" not in texts[0]:
+        res["problems"].append("ページ番号が無い")
+    res["fonts"] = sorted(fonts)
+    res["ok"] = not res["problems"]
+    return res
+
+
+def check_docx(path: Path, expect: list[str] = ()) -> dict:
+    import docx
+    try:
+        d = docx.Document(str(path))
+    except Exception as e:  # noqa: BLE001
+        return {"file": path.name, "ok": False, "problems": [f"開けない: {e}"]}
+    text = "\n".join(p.text for p in d.paragraphs) + "\n".join(
+        c.text for t in d.tables for r in t.rows for c in r.cells)
+    missing = [e for e in expect if e not in text]
+    probs = [f"期待する文が見つからない: {missing[:3]}"] if missing else []
+    if "�" in text:
+        probs.append("置換文字（文字化け）がある")
+    return {"file": path.name, "ok": not probs, "problems": probs}
+
+====================================================================================================
+# ファイル: src/structlab/exam/pipeline.py
+====================================================================================================
+"""試験対策の全工程をつなぐ。各段階の結果を work に保存し、途中停止後は続きから再開する。"""
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+from . import box as B
+from . import classify as C
+from . import cues as Q
+from . import materials as M
+from . import questions as G
+from . import render as R
+from . import scoring as S
+from . import text as T
+from . import topics as P
+from .analyze import cached_read
+from .discover import Discovery, Material, box_materials, discover_dropbox, discover_local, kind_of, sha256_file
+
+ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_CONFIG = ROOT / "configs" / "exam.yaml"
+
+
+def load_config(path: Path | None = None) -> dict:
+    cfg = yaml.safe_load((path or DEFAULT_CONFIG).read_text(encoding="utf-8")) or {}
+    cfg.setdefault("subjects", [])
+    cfg.setdefault("video", {})
+    if (cfg.get("ai") or {}).get("enabled"):
+        raise SystemExit("外部 AI は承認が必要です（この版は外部 AI を呼びません）。configs/exam.yaml の ai.enabled を false にしてください")
+    return cfg
+
+
+class DropboxUnavailable(RuntimeError):
+    """Dropbox の認証・接続に失敗した（理由は伏せ字済み）。"""
+
+
+@dataclass
+class Options:
+    input_dir: Path | None = None
+    dropbox_root: str | None = None
+    box_urls: list[str] = field(default_factory=list)
+    work: Path = ROOT / "work" / "exam"
+    out: Path = ROOT / "output" / "exam"
+    allow_download: bool = False
+    use_browser: bool = True
+    use_http: bool = True
+    recheck_box_hours: float = 24.0
+    docx: bool = True
+    overrides: Path | None = None
+    config: Path | None = None
+    log: object = print
+
+
+def _json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _load(path: Path, default):
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
+
+
+def _safe(name: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "名称なし"
+
+
+# ---------------- 段階 1・2: 発見と Box ----------------
+def discover_all(o: Options) -> Discovery:
+    d = Discovery()
+    if o.input_dir:
+        discover_local(o.input_dir, d)
+    if o.dropbox_root is not None:
+        from ..sources.base import SourceError
+        from ..sources.dropbox_source import DropboxSource, redact
+        try:
+            discover_dropbox(DropboxSource(o.dropbox_root), o.work / "dropbox_cache", d)
+        except SourceError as e:
+            raise DropboxUnavailable(f"Dropbox に接続できません: {redact(str(e))}") from None
+        except Exception as e:  # noqa: BLE001  # dropbox ライブラリの認証・通信エラー
+            raise DropboxUnavailable(f"Dropbox に接続できません（{type(e).__name__}）: {redact(str(e))[:300]}") from None
+    from .links import classify_url
+    for u in o.box_urls:
+        r = classify_url(u)
+        r.sources.append("direct:指定された URL")
+        d.links.append(r)
+    for m in box_materials(d):
+        d.materials.append(m)
+    return d
+
+
+def check_boxes(d: Discovery, o: Options) -> dict[str, dict]:
+    cache_path = o.work / "box_checks.json"
+    cache = _load(cache_path, {})
+    out = {}
+    for m in [m for m in d.materials if m.kind == "box_link"]:
+        url = m.source[4:]
+        prev = cache.get(url)
+        fresh = prev and time.time() - prev["checked_at"] < o.recheck_box_hours * 3600
+        if fresh and not (o.allow_download and prev["state"] == "C" and prev.get("can_download")):
+            chk = prev
+        else:
+            o.log(f"Box リンクを確認: {url}")
+            chk = B.check_link(url, work_dir=o.work, allow_download=o.allow_download, use_browser=o.use_browser,
+                               use_http=o.use_http).as_dict()
+            cache[url] = chk
+            _json(cache_path, cache)
+        out[m.id] = chk
+        if chk.get("name"):
+            m.notes.append(f"Box 上の名前: {chk['name']}")
+        if chk["state"] == "A" and chk.get("local_path"):
+            p = Path(chk["local_path"])
+            m.local_path, m.size, m.sha256 = str(p), p.stat().st_size, sha256_file(p)
+            m.kind = kind_of(p.name) or "video"
+    return out
+
+
+def write_box_outputs(d: Discovery, checks: dict[str, dict], cov: dict[str, dict], out: Path) -> None:
+    base = out / "Boxリンク管理"
+    _json(base / "URL一覧.json", [r.as_dict() for r in d.links])
+    _json(base / "抽出ログ.json", d.link_logs)
+    _json(base / "アクセス検査結果.json", checks)
+    base.mkdir(parents=True, exist_ok=True)
+    with open(base / "動画取得可否一覧.csv", "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["URL", "見つけた場所", "名前", "種類", "サイズ(バイト)", "再生時間", "状態", "状態の説明", "理由",
+                    "ダウンロード許可", "解析状況"])
+        for m in [m for m in d.materials if m.kind == "box_link" or m.source.startswith("box:")]:
+            c = checks.get(m.id, {})
+            w.writerow([m.source[4:], " / ".join([*([m.folder + "/" + m.name] if m.folder else [m.name]), *m.also_at]),
+                        c.get("name") or "不明", c.get("extension") or "不明", c.get("size") or "不明",
+                        c.get("duration_text") or "不明", c.get("state"), c.get("state_label"), c.get("reason"),
+                        {True: "可", False: "不可"}.get(c.get("can_download"), "不明"),
+                        cov.get(m.id, {}).get("detail", "")])
+
+
+# ---------------- 段階 3〜: 読み取り・判定・教材 ----------------
+def _sidecars(d: Discovery) -> dict[str, Path]:
+    """動画（または Box リンク）と同じ名前の字幕・文字起こしを対応づける。"""
+    subs = {Path(m.name).stem: m for m in d.materials if m.kind == "transcript"}
+    out = {}
+    for m in d.materials:
+        if m.kind in ("video", "audio", "box_link"):
+            s = subs.get(Path(m.name).stem)
+            if s:
+                out[m.id] = Path(s.local_path)
+                s.notes.append(f"{m.name} の字幕として使用")
+    return out
+
+
+def read_all(d: Discovery, o: Options, cfg: dict) -> dict[str, dict]:
+    from .. import media
+    from .analyze import parse_subtitles
+    vcfg = cfg.get("video", {})
+    ocr = media.OCR("auto")
+    transcriber = None
+    if vcfg.get("transcription") == "faster_whisper":
+        try:
+            transcriber = media.FasterWhisperTranscriber(vcfg.get("whisper_model", "small"), "ja", "cpu", "int8")
+        except media.MediaError as e:
+            o.log(f"文字起こしを使えません: {e}")
+    side = _sidecars(d)
+    used_as_sidecar = {str(p) for p in side.values()}
+    readings = {}
+    for m in d.materials:
+        if m.kind == "transcript" and m.local_path in used_as_sidecar:
+            continue
+        if m.kind == "box_link":
+            r = {"material": m.id, "units": [], "coverage": {"status": "未取得", "detail": "動画本体は未取得"}}
+            if m.id in side:
+                sp = parse_subtitles(side[m.id].read_text(encoding="utf-8", errors="replace"))
+                r["units"] = [{"kind": "speech", **s} for s in sp]
+                r["coverage"] = {"status": "一部", "detail": f"映像: 未取得 / 音声: 字幕ファイル {len(sp)} 件"}
+            readings[m.id] = r
+            continue
+        o.log(f"読み取り: {m.name}")
+        try:
+            readings[m.id] = cached_read(m, o.work, ocr=ocr, transcriber=transcriber, sidecar=side.get(m.id),
+                                         video_interval=float(vcfg.get("interval", 2.0)), log=o.log)
+        except Exception as e:  # noqa: BLE001
+            readings[m.id] = {"material": m.id, "units": [], "coverage": {"status": "失敗", "detail": str(e)[:200]}}
+    return readings
+
+
+def _why_unanalyzed(m: Material, cov: dict, chk: dict | None) -> str | None:
+    if m.kind == "box_link":
+        return (chk or {}).get("state_label", "未確認") + ("" if cov.get("status") != "一部" else "（字幕のみ）")
+    if cov.get("status") in ("完了", None):
+        return None
+    return cov.get("detail") or cov.get("status")
+
+
+def slide_alignment(mats: list[dict], readings: dict, topics: list[dict]) -> list[dict]:
+    """動画の画面（OCR）と配布資料のページを照合する。"""
+    page_topic = {}
+    for t in topics:
+        for s in t["sources"]:
+            if s["kind"] in ("page", "text"):
+                page_topic[(s["material"], s["page"])] = (t["id"], " ".join(t["texts"]))
+    out = []
+    for m in mats:
+        for u in readings.get(m["id"], {}).get("units", []):
+            if u["kind"] != "scene" or len(u.get("text", "").strip()) < 10:
+                continue
+            best = max(((T.similarity(u["text"], txt), k, tid) for k, (tid, txt) in page_topic.items()),
+                       default=(0, None, None))
+            if best[0] >= 0.4:
+                out.append({"material": m["id"], "start": u["start"], "end": u["end"], "slide_material": best[1][0],
+                            "page": best[1][1], "topic": best[2], "similarity": round(best[0], 2)})
+    return out
+
+
+def analyze_subject(subject: str, mats: list[dict], readings: dict, cls: dict, cfg: dict, unanalyzed: list[dict],
+                    overrides: dict) -> dict:
+    topics = P.build_topics(subject, mats, readings, cls)
+    patterns = Q.compile_patterns(cfg)
+    cues = []
+    for m in mats:
+        cues += Q.find_cues(readings.get(m["id"], {}).get("units", []), m["id"], patterns, cls[m["id"]]["lecture"])
+    align = slide_alignment(mats, readings, topics)
+
+    def slide_for_time(mid, t):
+        mine = [a for a in align if a["material"] == mid]
+        hit = next((a for a in mine if a["start"] <= t < a["end"]), None)  # その時刻を含む場面を優先
+        hit = hit or next((a for a in mine if a["start"] - 1 <= t <= a["end"] + 1), None)
+        return hit["topic"] if hit else None
+
+    Q.resolve_targets(cues, topics, slide_for_time)
+    for c in cues:  # スライドに結びつかない発言（動画だけの授業など）は、発言から論点を作る
+        if c.target_topic is None and c.type not in ("scope", "correction"):
+            t = P.topic_from_cue(subject, c, len(topics))
+            topics.append(t)
+            c.target_topic, c.target_note = t["id"], "発言の文脈から論点を作成（スライドと未照合）"
+    info = P.attach_document_evidence(topics, mats, readings, cls)
+    all_units = [(m["id"], cls[m["id"]]["lecture"], u) for m in mats
+                 for u in readings.get(m["id"], {}).get("units", [])]
+    P.attach_repetition(topics, all_units)
+    qs_past = [q for m in mats if m["role"] == "past_exam" for u in readings.get(m["id"], {}).get("units", [])
+               for q in P.split_questions(u.get("text", ""))]
+    if qs_past:
+        info["calc_share"] = sum(1 for q in qs_past if re.search(r"求めよ|計算|=|＝", q)) / len(qs_past)
+    j = {}
+    for t in topics:
+        j[t["id"]] = S.apply_overrides(t, S.score_topic(t, cues, info, cfg, unanalyzed), overrides)
+    order = {"S": 0, "A": 1}
+    selected = sorted([t for t in topics if j[t["id"]]["grade"] in order],
+                      key=lambda t: (order[j[t["id"]]["grade"]], -j[t["id"]]["score"]))
+    questions = {t["id"]: G.questions_for(t, [o for o in selected if o["id"] != t["id"]]) for t in selected}
+    mocks = G.mock_exams(selected, j, info)
+    return {"subject": subject, "topics": topics, "judgments": j, "cues": [c.as_dict() for c in cues],
+            "info": info, "selected": [t["id"] for t in selected], "questions": questions, "mocks": mocks,
+            "alignment": align, "unanalyzed": unanalyzed}
+
+
+def ledger_of(res: dict, names: dict) -> dict:
+    """出題根拠台帳（JSON）。各論点の判定・支持/反対証拠・未確認事項・出典。"""
+    items = []
+    for t in res["topics"]:
+        j = res["judgments"][t["id"]]
+        items.append({
+            "id": t["id"], "subject": res["subject"], "lectures": t["lectures"], "title": t["title"],
+            "content": t["summary"], "grade": j["grade"], "grade_sub": j["sub"], "reason": j["reason"],
+            "confidence": j["confidence"], "score_internal": j["score"], "factors": j["factors"],
+            "explicit_or_inferred": "明示" if any(e.get("basis", "").startswith("明示") for e in j["support"]) else "推測",
+            "support": j["support"], "against": j["against"], "unknowns": j["unknowns"],
+            "past_exam_years": j["past_exam_years"],
+            "assignment_relation": [e["name"] for e in t["evidence"] if e["type"] == "assignment"],
+            "formulas": t["formulas"], "question_types": sorted({q["type"] for q in res["questions"].get(t["id"], [])}),
+            "sources": [M.fmt_source(s, names) for s in t["sources"]],
+            **({"overridden": True, "auto_grade": j["auto_grade"]} if j.get("overridden") else {}),
+        })
+    return {"subject": res["subject"], "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "note": "点数は根拠の内部点数で、出題確率ではない", "scope_lectures": res["info"].get("scope_lectures"),
+            "past_exam_years": res["info"].get("past_exam_years"), "unanalyzed": res["unanalyzed"], "topics": items}
+
+
+def record_history(work: Path, subject: str, ledger: dict) -> list[dict]:
+    """前回の判定と比べ、変わった論点を履歴に残す（A→S、範囲から除外など）。"""
+    prev_path = work / "ledger" / f"{_safe(subject)}.json"
+    prev = {t["title"]: t for t in _load(prev_path, {"topics": []})["topics"]}
+    changes = []
+    for t in ledger["topics"]:
+        p = prev.get(t["title"])
+        if p is None and prev:
+            changes.append({"topic": t["title"], "from": None, "to": t["grade"], "reason": "新しい論点"})
+        elif p and p["grade"] != t["grade"]:
+            changes.append({"topic": t["title"], "from": p["grade"], "to": t["grade"], "reason": t["reason"]})
+    now = {t["title"] for t in ledger["topics"]}
+    changes += [{"topic": k, "from": v["grade"], "to": None, "reason": "論点が見つからなくなった"}
+                for k, v in prev.items() if k not in now]
+    if changes:
+        with open(work / "history.jsonl", "a", encoding="utf-8") as f:
+            for c in changes:
+                f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "subject": subject, **c},
+                                   ensure_ascii=False) + "\n")
+    _json(prev_path, ledger)
+    return changes
+
+
+def render_subject(res: dict, ledger: dict, names: dict, out: Path, work: Path, docx: bool, log=print) -> dict:
+    base = out / "科目一覧" / _safe(res["subject"]) / "試験対策"
+    by_id = {t["id"]: t for t in res["topics"]}
+    selected = [by_id[i] for i in res["selected"]]
+    ctx = {"subject": res["subject"], "topics": res["topics"], "selected": selected, "j": res["judgments"],
+           "questions": res["questions"], "names": names, "info": res["info"], "by_id": by_id,
+           "unanalyzed": res["unanalyzed"]}
+    fp = hashlib.sha256(json.dumps([ledger["topics"], res["questions"], res["mocks"]], ensure_ascii=False,
+                                   sort_keys=True, default=str).encode()).hexdigest()
+    fp_path = work / "render_fp" / f"{_safe(res['subject'])}.txt"
+    if fp_path.exists() and fp_path.read_text() == fp and (base / "最重要事項.pdf").exists():
+        log(f"  {res['subject']}: 内容に変更なし（教材は作り直さない）")
+        return {"skipped": True, "checks": _load(base / "品質検査.json", [])}
+    all_q = [q for t in selected for q in res["questions"][t["id"]]]
+    docs = {
+        "最重要事項": (M.doc_summary(ctx), [t["title"] for t in selected[:3]]),
+        "徹底対策資料": (M.doc_deep(ctx), [t["title"] for t in selected[:3]]),
+        "公式一覧": (M.doc_formulas(ctx), []),
+        "予想問題": (M.doc_questions(f"{res['subject']}　予想問題", all_q), ["問1"] if all_q else []),
+        "解答用紙": (M.doc_answer_sheet(f"{res['subject']}　予想問題　解答用紙", all_q), []),
+        "解答解説": (M.doc_solutions(f"{res['subject']}　予想問題　解答・解説", all_q, ctx), []),
+        "判定一覧": (M.doc_judgments(ctx), []),
+    }
+    for ex in res["mocks"]:
+        d = base / f"模擬テスト第{ex['no']}回"
+        meta = (f"試験時間 {ex['time_minutes']} 分・100 点満点（{ex['provisional']}）。"
+                "解答は別紙の解答用紙に記入すること。")
+        docs[f"模擬テスト第{ex['no']}回/問題"] = (M.doc_questions(ex["title"], ex["questions"], meta, points=True), [])
+        docs[f"模擬テスト第{ex['no']}回/解答用紙"] = (M.doc_answer_sheet(ex["title"] + "　解答用紙", ex["questions"]), [])
+        sol = M.doc_solutions(ex["title"] + "　解答・解説", ex["questions"], ctx)
+        sol.insert(1, {"t": "small", "text": "出題の設計: " + ex["design"]})
+        docs[f"模擬テスト第{ex['no']}回/解答解説"] = (sol, [])
+        d.mkdir(parents=True, exist_ok=True)
+    checks = []
+    for name, (blocks, expect) in docs.items():
+        pdf = base / f"{name}.pdf"
+        R.to_pdf(blocks, pdf, title=name, header=res["subject"])
+        chk = R.check_pdf(pdf, expect, render_dir=work / "renders" / _safe(res["subject"]))
+        if name.endswith("/問題") and any(f"［重要度" in str(b.get("text", "")) for b in blocks):
+            chk["problems"].append("問題用紙に重要度が表示されている")
+            chk["ok"] = False
+        checks.append(chk)
+        if docx:
+            dx = R.to_docx(blocks, base / f"{name}.docx", title=name)
+            checks.append(R.check_docx(dx, expect))
+    _json(base / "出題根拠.json", ledger)
+    _json(base / "模擬テスト.json", res["mocks"])
+    _json(base / "品質検査.json", checks)
+    fp_path.parent.mkdir(parents=True, exist_ok=True)
+    fp_path.write_text(fp)
+    return {"skipped": False, "checks": checks}
+
+
+def run(o: Options) -> dict:
+    cfg = load_config(o.config)
+    overrides = yaml.safe_load(o.overrides.read_text(encoding="utf-8")) if o.overrides and o.overrides.exists() else {}
+    o.work.mkdir(parents=True, exist_ok=True)
+    report: dict = {"started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "stages": {}}
+    d = discover_all(o)
+    report["stages"]["discover"] = {"materials": len(d.materials), "links": len(d.links),
+                                    "duplicates": d.duplicates, "skipped": d.skipped}
+    checks = check_boxes(d, o)
+    report["stages"]["box"] = {k: {x: v.get(x) for x in ("url", "state", "state_label", "reason", "name")}
+                               for k, v in checks.items()}
+    readings = read_all(d, o, cfg)
+    cov = {k: v.get("coverage", {}) for k, v in readings.items()}
+    write_box_outputs(d, checks, cov, o.out)
+    mats = [m.as_dict() for m in d.materials if m.id in readings]
+    names = {m["id"]: m["name"] for m in mats}
+    cls = C.classify(mats, readings, cfg["subjects"])
+    for m in mats:  # Box の名前（04.mp4 など）も講義回の手がかりにする
+        chk = checks.get(m["id"])
+        if chk and cls[m["id"]]["lecture"] is None and chk.get("name"):
+            lec, ev = C.lecture_of(chk["name"], "", "")
+            if lec:
+                cls[m["id"]].update(lecture=lec, lecture_evidence=f"Box 上の名前「{chk['name']}」の{ev}（推測）")
+    _json(o.out / "全体処理履歴" / "分類結果.json",
+          [{"name": m["name"], "source": m["source"], "role": m["role"], **cls[m["id"]],
+            "coverage": cov.get(m["id"])} for m in mats])
+    subjects: dict[str, list[dict]] = {}
+    for m in mats:
+        subjects.setdefault(cls[m["id"]]["subject"], []).append(m)
+    report["subjects"] = {}
+    for subj, ms in subjects.items():
+        un = []
+        for m in ms:
+            why = _why_unanalyzed(Material(**m), cov.get(m["id"], {}), checks.get(m["id"]))
+            if why:
+                un.append({"name": m["name"], "source": m["source"], "lecture": cls[m["id"]]["lecture"], "why": why})
+        if subj == C.UNKNOWN:
+            _json(o.out / "未分類・要確認" / "一覧.json",
+                  [{"name": m["name"], "source": m["source"], "evidence": cls[m["id"]]["evidence"]} for m in ms])
+            report["subjects"][subj] = {"materials": len(ms), "note": "科目を判定できない資料。configs/exam.yaml の subjects に科目を登録するか、科目名のフォルダに置く"}
+            continue
+        o.log(f"科目「{subj}」を解析（資料 {len(ms)} 件）")
+        res = analyze_subject(subj, ms, readings, cls, cfg, un, overrides)
+        led = ledger_of(res, names)
+        changes = record_history(o.work, subj, led)
+        rr = render_subject(res, led, names, o.out, o.work, o.docx, o.log)
+        _json(o.out / "科目一覧" / _safe(subj) / "解析データ" / "スライド照合.json", res["alignment"])
+        _json(o.out / "科目一覧" / _safe(subj) / "解析データ" / "重要発言.json", res["cues"])
+        grades = {g: sum(1 for x in res["judgments"].values() if x["grade"] == g) for g in "SABC"}
+        report["subjects"][subj] = {
+            "materials": len(ms), "topics": len(res["topics"]), "grades": grades,
+            "mock_exams": len(res["mocks"]), "unanalyzed": un, "history_changes": changes,
+            "rendered": not rr["skipped"], "quality_problems": [c for c in rr["checks"] if not c["ok"]],
+            "calc_verified": all(q.get("verified", True) for qs in res["questions"].values() for q in qs),
+        }
+    report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _json(o.out / "全体処理履歴" / "実行報告.json", report)
+    return report
+
+====================================================================================================
+# ファイル: src/structlab/exam/sync.py
+====================================================================================================
+"""Dropbox の出力フォルダとの同期（クラウド実行で、教材と処理状態を GitHub に残さないため）。
+
+  <出力フォルダ>/試験対策システム/...   生成した教材・Box 検査結果（output と同じ構成）
+  <出力フォルダ>/_state/exam_state.tar.gz  処理状態（読み取り結果・Box 確認結果・判定台帳・履歴）。次回はここから再開
+出力フォルダが資料フォルダと重なる場合は、元資料保護のため既存の DropboxOutput が中止する。
+"""
+from __future__ import annotations
+
+import tarfile
+from pathlib import Path
+
+STATE = "_state/exam_state.tar.gz"
+#: 再開に必要な状態だけ（画像・動画のコマは容量が大きいので持ち越さない）
+KEEP = ("readings/*.json", "box_checks.json", "ledger/*.json", "history.jsonl", "render_fp/*.txt")
+
+
+def restore_state(dst, work: Path) -> bool:
+    work.mkdir(parents=True, exist_ok=True)
+    arc = work / "_restore.tar.gz"
+    if not dst.download_if_exists(STATE, arc):
+        return False
+    with tarfile.open(arc) as t:
+        for m in t.getmembers():
+            if m.isfile() and not m.name.startswith(("/", "..")) and ".." not in Path(m.name).parts:
+                t.extract(m, work, filter="data")
+    arc.unlink()
+    return True
+
+
+def save_state(dst, work: Path) -> int:
+    files = sorted({p for pat in KEEP for p in work.glob(pat) if p.is_file()})
+    arc = work / "_state.tar.gz"
+    with tarfile.open(arc, "w:gz") as t:
+        for p in files:
+            t.add(p, arcname=p.relative_to(work).as_posix())
+    dst.upload(arc, STATE)
+    arc.unlink()
+    return len(files)
+
+
+def upload_outputs(dst, out: Path, prefix: str = "試験対策システム") -> int:
+    n = 0
+    for p in sorted(out.rglob("*")):
+        if p.is_file():
+            dst.upload(p, f"{prefix}/{p.relative_to(out).as_posix()}")
+            n += 1
+    return n
+
+====================================================================================================
+# ファイル: src/structlab/exam/cli.py
+====================================================================================================
+"""structlab-exam: 試験出題予測・集中対策システムのコマンド。
+
+  structlab-exam run --input <フォルダ> [--dropbox-root /授業] [--box-url URL ...]
+  structlab-exam box-check <URL または .url ファイル> ... [--allow-download]
+  structlab-exam env      使える外部ツール（ffmpeg・tesseract・Playwright など）を表示
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+from pathlib import Path
+
+from . import box as B
+from . import links as L
+
+
+def cmd_env(_a) -> int:
+    from .. import media
+    info = {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"),
+            "tesseract": media.OCR("auto").label, "libreoffice": shutil.which("soffice") or shutil.which("libreoffice"),
+            "browser": B.browser_available()}
+    try:
+        import faster_whisper  # noqa: F401
+        info["faster_whisper"] = True
+    except ImportError:
+        info["faster_whisper"] = False
+    import os
+    info["secrets"] = {k: ("あり" if os.environ.get(k) else "なし") for k in
+                       ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "BOX_ACCESS_TOKEN")}
+    print(json.dumps(info, ensure_ascii=False, indent=1))
+    return 0
+
+
+def cmd_box_check(a) -> int:
+    urls = []
+    for x in a.targets:
+        p = Path(x)
+        if p.exists():
+            recs, _ = L.extract_links(p.read_bytes(), p.name, f"local:{p}")
+            urls += [r.url for r in recs]
+        else:
+            urls.append(x)
+    results = []
+    for u in L.dedupe([L.classify_url(u) for u in urls]):
+        c = B.check_link(u.url, work_dir=Path(a.work), allow_download=a.allow_download,
+                         use_browser=not a.no_browser).as_dict()
+        results.append(c)
+        if a.quiet:
+            print(f"[{c['state']}] {c['state_label']}（{c['reason']}）")
+        else:
+            print(f"[{c['state']}] {c['state_label']}: {u.url}\n    名前={c['name']} 再生時間={c['duration_text']} "
+                  f"ダウンロード許可={c['can_download']} 理由={c['reason']}")
+    if a.json:
+        Path(a.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.json).write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    return 0
+
+
+def _summary(rep: dict) -> dict:
+    """公開されるログ（公開リポジトリの Actions）向け: 件数だけ。科目名・ファイル名・URL は出さない。"""
+    subs = [v for k, v in rep["subjects"].items() if k != "要確認"]
+    return {"subjects": len(subs),
+            "grades": {g: sum(v.get("grades", {}).get(g, 0) for v in subs) for g in "SABC"},
+            "mock_exams": sum(v.get("mock_exams", 0) for v in subs),
+            "unanalyzed": sum(len(v.get("unanalyzed", [])) for v in subs),
+            "unclassified": rep["subjects"].get("要確認", {}).get("materials", 0),
+            "box_states": {st: sum(1 for b in rep["stages"]["box"].values() if b["state"] == st) for st in "ABCDEF"},
+            "quality_problems": sum(len(v.get("quality_problems", [])) for v in subs)}
+
+
+def cmd_run(a) -> int:
+    from .pipeline import Options, run
+    o = Options(input_dir=Path(a.input) if a.input else None, dropbox_root=a.dropbox_root, box_urls=a.box_url or [],
+                work=Path(a.work), out=Path(a.out), allow_download=a.allow_download, use_browser=not a.no_browser,
+                docx=not a.no_docx, overrides=Path(a.overrides) if a.overrides else None,
+                config=Path(a.config) if a.config else None)
+    if a.quiet:
+        o.log = lambda *x: None
+    if not (o.input_dir or o.dropbox_root is not None or o.box_urls):
+        print("入力がありません: --input / --dropbox-root / --box-url のいずれかを指定してください", file=sys.stderr)
+        return 2
+    from .pipeline import DropboxUnavailable
+    dst = None
+    if a.dropbox_out:
+        from ..sources.base import SourceError
+        from ..sources.dropbox_source import DropboxOutput, redact
+        from . import sync
+        try:
+            dst = DropboxOutput(a.dropbox_out, a.dropbox_root or "")
+            print("前回の処理状態を復元:", "あり" if sync.restore_state(dst, o.work) else "なし（初回）")
+        except Exception as e:  # noqa: BLE001
+            print(f"Dropbox の出力フォルダを使えません: {redact(str(e))[:300]}", file=sys.stderr)
+            return 3
+    try:
+        rep = run(o)
+    except DropboxUnavailable as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    finally:
+        if dst is not None:  # 途中で止まっても、そこまでの状態を保存して次回続きから
+            print("処理状態を保存:", sync.save_state(dst, o.work), "件")
+    if dst is not None:
+        print("教材を Dropbox に保存:", sync.upload_outputs(dst, o.out), "件")
+    if a.quiet:
+        print(json.dumps(_summary(rep), ensure_ascii=False, indent=1))
+    else:
+        print(json.dumps({"subjects": rep["subjects"], "box": rep["stages"]["box"]}, ensure_ascii=False, indent=1,
+                         default=str)[:6000])
+    bad = [s for s, v in rep["subjects"].items() if v.get("quality_problems")]
+    return 1 if bad else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="structlab-exam", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    e = sub.add_parser("env", help="使える外部ツールを表示")
+    e.set_defaults(fn=cmd_env)
+    b = sub.add_parser("box-check", help="Box 共有リンクの検査（取得可否の判定）")
+    b.add_argument("targets", nargs="+", help="URL または .url / テキストファイル")
+    b.add_argument("--allow-download", action="store_true", help="許可されている場合だけ公式の手段で取得する")
+    b.add_argument("--no-browser", action="store_true")
+    b.add_argument("--work", default="work/exam")
+    b.add_argument("--json", help="結果を JSON で保存")
+    b.add_argument("--quiet", action="store_true", help="URL・ファイル名をログに出さない")
+    b.set_defaults(fn=cmd_box_check)
+    r = sub.add_parser("run", help="解析して教材を作る（差分更新・途中再開）")
+    r.add_argument("--input", help="ローカルの資料フォルダ（読み取りのみ）")
+    r.add_argument("--dropbox-root", help="Dropbox の資料フォルダ（例: /授業）")
+    r.add_argument("--box-url", action="append", help="Box 共有 URL を直接指定（複数可）")
+    r.add_argument("--work", default="work/exam")
+    r.add_argument("--out", default="output/exam")
+    r.add_argument("--allow-download", action="store_true")
+    r.add_argument("--no-browser", action="store_true")
+    r.add_argument("--no-docx", action="store_true")
+    r.add_argument("--overrides", help="重要度の手動修正（YAML: 論点ID または題名 → {grade, reason}）")
+    r.add_argument("--config", help="設定ファイル（既定: configs/exam.yaml）")
+    r.add_argument("--dropbox-out", help="教材と処理状態を保存する Dropbox のフォルダ（資料フォルダと重ならないこと）")
+    r.add_argument("--quiet", action="store_true", help="ログに科目名・ファイル名・URL を出さない（公開リポジトリの Actions 用）")
+    r.set_defaults(fn=cmd_run)
+    a = ap.parse_args(argv)
+    return a.fn(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+====================================================================================================
+# ファイル: configs/exam.yaml
+====================================================================================================
+# 試験対策システムの設定（structlab-exam）。コードから分離した判定条件・パターン。
+# 値を変えたら、次回の実行で該当する科目の判定と教材が作り直される。
+
+# 科目の一覧（任意）。空でも動く: その場合はフォルダ名・資料の表紙から科目を推定し、判断できなければ「要確認」。
+# name: 科目名 / aliases: ファイル名・フォルダ名に現れる別表記 / keywords: 内容に現れる専門用語 / teachers: 教員名
+subjects: []
+#  - name: 環境工学Ⅳ
+#    aliases: [環境工学4, 環境工学IV]
+#    keywords: [音圧レベル, 残響時間, 吸音率, 透過損失, 鏡像音源]
+#  - name: 鉄筋コンクリート構造Ⅱ
+#    aliases: [RC構造2, RC構造Ⅱ]
+#    keywords: [曲げ耐力, せん断補強, 中立軸, 引張鉄筋]
+
+# 教員の発言・資料の記述から出題根拠を見つけるパターン（正規表現）。
+# polarity: + は出題を支持、- は除外、0 は要確認（訂正など）。strength: 根拠の強さ（1〜3）。
+cues:
+  exam_explicit:
+    polarity: +
+    strength: 3
+    label: 出題の明示
+    patterns:
+      - (試験|テスト|期末|中間)(に|で|には)(必ず|絶対|たぶん|きっと)?(出|出題)(し?ます|る|す|題する|題します)
+      - (ここ|これ|この(問題|式|図|表|内容|範囲|部分))は(必ず|絶対)?(試験|テスト)に?(出|出題)
+      - 出題(します|する予定|範囲です)
+  memorize:
+    polarity: +
+    strength: 2
+    label: 暗記の指示
+    patterns:
+      - (覚えて|暗記して)(ください|おいて|おく|ね)
+      - (覚えておく|暗記しておく)(こと|べき)
+  important_formula:
+    polarity: +
+    strength: 2
+    label: 重要な式・内容の指示
+    patterns:
+      - (この|その|次の|の)?(式|公式|関係式|定義)(は|が)(とても|非常に|特に)?重要
+      - (ここ|これ|ここの部分)(は|が)(とても|非常に|特に)?(重要|大事|ポイント)(です|だ|ですよ|になります)
+  frequent:
+    polarity: +
+    strength: 3
+    label: 頻出の指示
+    patterns:
+      - (毎年|例年|よく|頻繁に)(出|出題)(ます|て|る|され)
+      - 過去(に|の試験で)も?(出|出題)(ています|た|ました)
+  calc_skill:
+    polarity: +
+    strength: 2
+    label: 計算できるようにする指示
+    patterns:
+      - 計算(が)?できるように(して|なって|しておいて)
+      - (解ける|求められる)ように(して|なって|しておいて)
+  understand:
+    polarity: +
+    strength: 1
+    label: 理解の指示
+    patterns:
+      - (考え方|意味|違い|仕組み)を(しっかり|よく)?理解して
+  sufficient:
+    polarity: +
+    strength: 3
+    label: この問題が解ければ十分という指示
+    patterns:
+      - この(問題|演習|例題)が(解ければ|できれば)(大丈夫|十分|OK)
+  quiz:
+    polarity: +
+    strength: 2
+    label: 小テストでの確認
+    patterns:
+      - 小テストで(確認|出|聞き)
+  exclude:
+    polarity: "-"
+    strength: 3
+    label: 出題しない・範囲外の指示
+    patterns:
+      - (試験|テスト)(には|に|では)(出し?ません|出さない|出ない|出題しません|出題しない)
+      - (ここ|これ|この(部分|内容|式|範囲))は(試験|テスト)?(範囲外|範囲に含めません|出し?ません|出題しません)
+      - 範囲(から|より)?(外し|除外し|除き)ます
+      - 覚えなくて(いい|よい|大丈夫)
+  correction:
+    polarity: "0"
+    strength: 2
+    label: 訂正
+    patterns:
+      - (前回|先週|さっき|先ほど)の(説明|式|資料|スライド)(を|に)?(訂正|間違い|誤り)
+      - 訂正(します|してください)
+      - 正しくは
+  scope:
+    polarity: +
+    strength: 1
+    label: 試験範囲の告知
+    patterns:
+      - 試験範囲(は|：|:)
+      - 第\s*\d+\s*回(から|〜|~|－|-)\s*第?\s*\d+\s*回(まで)?が?(試験)?範囲
+
+# 出題可能性の判定（内部の点数。統計的な確率ではない）
+scoring:
+  weights:
+    explicit: 10      # 教員の明示（exam_explicit / frequent / sufficient）
+    directive: 4      # 暗記・重要・計算・小テストの指示
+    past_exam: 6      # 過去問 1 年度につき
+    repetition: 1.5   # 別の講義回・資料で同じ論点が再登場するごとに（上限あり）
+    assignment: 3     # 課題・演習・小テストに出た
+    emphasis: 1       # 資料上の強調（赤字・太字・「重要」の表記）。単独では採用しない
+    problemability: 1 # 問題にしやすい（式・定義・比較）。授業固有の証拠より弱い
+  repetition_cap: 3
+  a_threshold: 6      # A の下限
+  b_threshold: 2      # B の下限（これ未満で根拠が無く、未解析資料も無ければ C）
+
+# 外部 AI（有料 API）。初期状態は無効。明示的に許可したときだけ使う。
+ai:
+  enabled: false
+
+# 動画の読み取り
+video:
+  interval: 2.0          # 画面を調べる間隔（秒）
+  transcription: none    # none / faster_whisper（無料・ローカル。初回にモデルを取得）
+  whisper_model: small
+
+====================================================================================================
+# ファイル: .github/workflows/exam.yml
+====================================================================================================
+# 試験対策教材の生成（手動実行）。Actions タブ → Exam preparation → Run workflow
+#
+# このリポジトリは公開されているため、授業内容を含む教材・処理状態は GitHub（Artifacts・キャッシュ・ログ）に
+# 残さず、Dropbox の出力フォルダにだけ保存する。ログには件数だけを出す（--quiet）。
+# リポジトリを非公開にした場合に限り、教材を Artifacts にも保存する（7 日で削除）。
+# 外部 AI（有料 API）は使わない。必要な Secrets: DROPBOX_APP_KEY / DROPBOX_APP_SECRET / DROPBOX_REFRESH_TOKEN
+# （出力フォルダへの保存に files.content.write の許可が必要）。任意: BOX_ACCESS_TOKEN（Box 公式 API で確認する場合）
+name: Exam preparation
+
+on:
+  workflow_dispatch:
+    inputs:
+      dropbox_root:
+        description: "資料のある Dropbox フォルダ（例: /授業動画）"
+        type: string
+        default: "/授業動画"
+      dropbox_out:
+        description: "教材の保存先 Dropbox フォルダ（資料フォルダと重ならないこと）"
+        type: string
+        default: "/試験対策出力"
+      allow_download:
+        description: "Box でダウンロードが許可されている動画だけ、公式の手段で取得して解析する"
+        type: boolean
+        default: false
+      transcription:
+        description: "動画音声の文字起こし（無料・ローカルの faster-whisper）"
+        type: choice
+        options: [none, faster_whisper]
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exam-preparation
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      BOX_ACCESS_TOKEN: ${{ secrets.BOX_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg tesseract-ocr tesseract-ocr-jpn fonts-ipafont-gothic
+      - name: Python packages
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e . playwright
+          python -m playwright install --with-deps chromium
+          if [ "${{ inputs.transcription }}" = "faster_whisper" ]; then python -m pip install faster-whisper; fi
+      - name: Settings
+        run: |
+          sed -i "s/^  transcription: .*/  transcription: ${{ inputs.transcription }}/" configs/exam.yaml
+          structlab-exam env | python -c "import json,sys; d=json.load(sys.stdin); print({k: bool(v) for k, v in d.items() if k != 'secrets'}, d['secrets'])"
+      - name: Build materials
+        env:
+          ROOT: ${{ inputs.dropbox_root }}
+          OUT: ${{ inputs.dropbox_out }}
+        run: |
+          structlab-exam run --dropbox-root "$ROOT" --dropbox-out "$OUT" --quiet \
+            ${{ inputs.allow_download && '--allow-download' || '' }}
+      - name: Keep materials as artifact (private repository only)
+        if: ${{ always() && github.event.repository.private }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: exam-materials
+          path: output/exam
+          retention-days: 7
+          if-no-files-found: ignore
+
+====================================================================================================
+# ファイル: .github/workflows/box-check.yml
+====================================================================================================
+# Box 共有リンクの検査（手動実行）。共有ページを開けるか・動画か・ダウンロードが許可されているかを判定する。
+# 公開リポジトリのため、URL・ファイル名はログに出さず（--quiet）、結果は Dropbox の出力フォルダに保存する。
+name: Box link check
+
+on:
+  workflow_dispatch:
+    inputs:
+      dropbox_url_file:
+        description: "Box リンクを記録した Dropbox の .url / テキスト（例: /授業動画/xxx.url）"
+        type: string
+        required: true
+      dropbox_out:
+        description: "結果の保存先 Dropbox フォルダ"
+        type: string
+        default: "/試験対策出力"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: box-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      BOX_ACCESS_TOKEN: ${{ secrets.BOX_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e . playwright
+          python -m playwright install --with-deps chromium
+      - name: Check
+        env:
+          SRC: ${{ inputs.dropbox_url_file }}
+          OUT: ${{ inputs.dropbox_out }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          from structlab.sources.dropbox_source import DropboxOutput, make_client
+          src, out = os.environ["SRC"], os.environ["OUT"]
+          Path("work").mkdir(exist_ok=True)
+          make_client().files_download_to_file("work/link.url", src)   # 読み取りのみ
+          rc = subprocess.call(["structlab-exam", "box-check", "work/link.url", "--quiet", "--json", "work/box_check.json"])
+          DropboxOutput(out, str(Path(src).parent)).upload(Path("work/box_check.json"), "試験対策システム/Boxリンク管理/単体検査結果.json")
+          sys.exit(rc)
+          PY
+
+====================================================================================================
+# ファイル: tools/restore_dump.py
+====================================================================================================
+"""ファイル区切り付き全文ダンプから元の相対パスとファイル内容を復元する。
+
+区切りは「= が 100 個の行 / `# ファイル: <path>` / = が 100 個の行」の 3 行組。
+本文中に同じ形の 3 行組が現れない限り誤認しない（3 行がそろったときだけ区切りとみなす）。
+既存ファイルは上書きしない（--force 指定時のみ）。復元結果は manifest（パス・行数・sha256）に記録する。
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+SEP = "=" * 100
+PREFIX = "# ファイル: "
+
+
+def parse(text: str) -> list[tuple[str, str, str]]:
+    lines = text.split("\n")
+    marks: list[tuple[int, str, str]] = []
+    i = 0
+    while i + 2 < len(lines):
+        if lines[i] == SEP and lines[i + 1].startswith(PREFIX) and lines[i + 2] == SEP:
+            raw = lines[i + 1][len(PREFIX):].strip()
+            # 「path  ※注記」形式の注記はパスに含めない（注記は manifest に残す）
+            path, _, note = raw.partition("  ※")
+            marks.append((i, path.strip(), note.strip()))
+            i += 3
+        else:
+            i += 1
+    files = []
+    for k, (start, path, note) in enumerate(marks):
+        end = marks[k + 1][0] if k + 1 < len(marks) else len(lines)
+        body = lines[start + 3:end]
+        # ダンプ側が各ファイルの後ろに入れた区切り用の空行を 1 行だけ除く
+        if body and body[-1] == "":
+            body = body[:-1]
+        content = "\n".join(body)
+        if content and not content.endswith("\n"):
+            content += "\n"
+        files.append((path, content, note))
+    return files
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dump")
+    ap.add_argument("out")
+    ap.add_argument("--manifest")
+    ap.add_argument("--force", action="store_true")
+    a = ap.parse_args(argv)
+    files = parse(Path(a.dump).read_text(encoding="utf-8"))
+    out = Path(a.out)
+    seen: dict[str, str] = {}
+    records, skipped, dups = [], [], []
+    for path, content, note in files:
+        if path.startswith("/") or ".." in Path(path).parts:
+            skipped.append({"path": path, "reason": "unsafe path"})
+            continue
+        h = hashlib.sha256(content.encode()).hexdigest()
+        if path in seen:
+            dups.append({"path": path, "same": seen[path] == h})
+            continue
+        seen[path] = h
+        dest = out / path
+        if dest.exists() and not a.force:
+            skipped.append({"path": path, "reason": "exists"})
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        records.append({"path": path, "lines": content.count("\n"), "sha256": h, **({"note": note} if note else {})})
+    manifest = {"source": Path(a.dump).name, "restored": records, "skipped": skipped, "duplicates": dups}
+    if a.manifest:
+        Path(a.manifest).write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"restored={len(records)} skipped={len(skipped)} duplicates={len(dups)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+====================================================================================================
+# ファイル: tests/exam_synth.py
+====================================================================================================
+"""試験対策システムのテスト用の合成資料（実在の授業資料ではない）。
+
+2 科目（環境工学Ⅳ・鉄筋コンクリート構造Ⅱ）のスライド PDF、字幕つきの短い動画、過去問、課題、
+試験範囲の連絡、Box 共有リンクの .url、科目を判定できない資料、重複投入した資料を作る。
+"""
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+
+ENV_SLIDES = [
+    ("第3回 音の反射と残響", ["環境工学Ⅳ 第3回", "担当: 試験 太郎"]),
+    ("音の反射", ["音が壁に当たると一部が反射し、一部が吸収・透過する。",
+                  "反射面が平らなとき、入射角と反射角は等しい。", "重要: 反射音は直接音より遅れて届く。"]),
+    ("鏡像音源法", ["反射面に対して音源と対称な位置に鏡像音源を置き、反射音の経路を求める方法を鏡像音源法という。",
+                    "反射音の行路差は、鏡像音源から受音点までの距離と直接音の距離の差である。"]),
+    ("残響時間", ["音を止めてから音圧レベルが60dB減衰するまでの時間を残響時間という。",
+                  "T = 0.16V/A", "T：残響時間 [s]、V：室容積 [m3]、A：等価吸音面積 [m2]",
+                  "室容積が大きいほど残響時間は長くなる。"]),
+    ("音の回折", ["音は障害物の裏側にも回り込む。これを回折という。", "波長が長い低音ほど回折しやすい。"]),
+    ("吸音率", ["吸音率は入射した音のエネルギーのうち反射しなかった割合である。", "α = 1 - R",
+                "α：吸音率、R：反射率"]),
+]
+RC_SLIDES = [
+    ("第2回 曲げを受ける部材", ["鉄筋コンクリート構造Ⅱ 第2回"]),
+    ("曲げ応力", ["部材に生じる曲げ応力は曲げモーメントを断面係数で割って求める。", "σ = M/Z",
+                  "σ：曲げ応力 [N/mm2]、M：曲げモーメント [N・mm]、Z：断面係数 [mm3]"]),
+    ("断面係数", ["長方形断面の断面係数は幅と高さの2乗に比例する。", "Z = bh²/6", "b：幅 [mm]、h：高さ [mm]"]),
+    ("中立軸", ["曲げを受ける部材で、応力が0となる軸を中立軸という。", "中立軸より上は圧縮、下は引張となる。"]),
+]
+ENV_SPEECH = [
+    (5, 12, "今日は音の反射と残響について説明します。"),
+    (30, 40, "反射音は直接音より遅れて届きます。"),
+    (60, 70, "鏡像音源法は試験に出します。行路差の求め方を理解してください。"),
+    (90, 100, "残響時間の式は重要です。計算できるようにしてください。"),
+    (130, 140, "音の回折は試験には出しません。"),
+    (160, 170, "吸音率は資料を読んでおいてください。"),
+]
+
+
+def make_pdf(path: Path, slides: list[tuple[str, list[str]]]) -> Path:
+    from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.pdfgen import canvas
+    from structlab.exam.render import jp_font
+    f = jp_font()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    c = canvas.Canvas(str(path), pagesize=landscape(A4))
+    w, h = landscape(A4)
+    for title, lines in slides:
+        c.setFont(f, 28)
+        c.drawString(50, h - 70, title)
+        c.setFont(f, 16)
+        for i, ln in enumerate(lines):
+            c.drawString(60, h - 130 - i * 34, ln)
+        c.showPage()
+    c.save()
+    return path
+
+
+def make_text_pdf(path: Path, title: str, paragraphs: list[str]) -> Path:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from structlab.exam.render import jp_font
+    f = jp_font()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    c = canvas.Canvas(str(path), pagesize=A4)
+    w, h = A4
+    c.setFont(f, 16)
+    c.drawString(50, h - 60, title)
+    c.setFont(f, 11)
+    y = h - 100
+    for p in paragraphs:
+        for ln in p.split("\n"):
+            c.drawString(50, y, ln)
+            y -= 20
+        y -= 8
+    c.save()
+    return path
+
+
+def make_video(pdf: Path, out: Path, seconds_per_page: int = 30) -> Path | None:
+    """スライド PDF の各ページを順に映し、音（正弦波）を付けた短い動画。ffmpeg が無ければ作らない。"""
+    if not shutil.which("ffmpeg"):
+        return None
+    import pymupdf
+    tmp = out.parent / (out.stem + "_frames")
+    tmp.mkdir(parents=True, exist_ok=True)
+    with pymupdf.open(str(pdf)) as doc:
+        n = doc.page_count
+        for i, page in enumerate(doc):
+            page.get_pixmap(dpi=40).save(str(tmp / f"f{i:02d}.png"))
+    lst = tmp / "list.txt"
+    lst.write_text("".join(f"file 'f{i:02d}.png'\nduration {seconds_per_page}\n" for i in range(n))
+                   + f"file 'f{n - 1:02d}.png'\n", encoding="utf-8")
+    total = n * seconds_per_page
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
+                    "-f", "lavfi", "-i", f"sine=frequency=300:duration={total}", "-vf",
+                    "scale=320:-2,format=yuv420p", "-r", "2", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-shortest", str(out)], check=True)
+    shutil.rmtree(tmp)
+    return out
+
+
+def vtt(lines: list[tuple[int, int, str]]) -> str:
+    ts = lambda s: f"00:{s // 60:02d}:{s % 60:02d}.000"  # noqa: E731
+    return "WEBVTT\n\n" + "\n\n".join(f"{ts(a)} --> {ts(b)}\n{t}" for a, b, t in lines) + "\n"
+
+
+def build(root: Path, video: bool = True) -> Path:
+    env = root / "環境工学Ⅳ"
+    rc = root / "鉄筋コンクリート構造Ⅱ"
+    slides = make_pdf(env / "第03回_講義資料.pdf", ENV_SLIDES)
+    make_pdf(rc / "第02回_講義資料.pdf", RC_SLIDES)
+    if video:
+        make_video(slides, env / "第03回_授業動画.mp4", seconds_per_page=30)
+        (env / "第03回_授業動画.vtt").write_text(vtt(ENV_SPEECH), encoding="utf-8")
+    make_text_pdf(env / "過去問" / "2024年度_期末試験.pdf", "環境工学Ⅳ 2024年度 期末試験", [
+        "問1 室容積 500 m3、等価吸音面積 80 m2 の室の残響時間 T = 0.16V/A を用いて求めよ。",
+        "問2 鏡像音源法を用いて、反射音の行路差の求め方を説明せよ。",
+    ])
+    make_text_pdf(env / "過去問" / "2023年度_期末試験.pdf", "環境工学Ⅳ 2023年度 期末試験", [
+        "問1 残響時間の定義を述べ、室容積との関係を説明せよ。",
+        "問2 気象と温熱環境について述べよ。",
+    ])
+    make_text_pdf(env / "課題_第3回.pdf", "環境工学Ⅳ 第3回 課題", [
+        "問1 吸音率 α = 1 - R の関係を用いて、反射率 0.3 のときの吸音率を求めよ。",
+    ])
+    (env / "試験範囲のお知らせ.txt").write_text("環境工学Ⅳ 試験範囲\n試験範囲は第1回〜第5回です。\n", encoding="utf-8")
+    (env / "授業動画").mkdir(parents=True, exist_ok=True)
+    (env / "授業動画" / "第04回.url").write_bytes(
+        "[InternetShortcut]\r\nURL=https://nihon-u.app.box.com/s/synthetictest0001?utm_source=x\r\n".encode("cp932"))
+    (rc / "第02回_講義資料_コピー.pdf").write_bytes((rc / "第02回_講義資料.pdf").read_bytes())  # 重複投入
+    make_text_pdf(root / "メモ.pdf", "メモ", ["買い物 牛乳 パン"])
+    return root
+
+====================================================================================================
+# ファイル: tests/test_exam_box.py
+====================================================================================================
+"""Box 共有リンク: .url からの抽出・共有ページの判定（状態 A〜F）・取得の可否。
+
+実際の Box には接続しない（ページと API の応答は模擬データ）。アクセス制限を回避する動作はテストしない。
+"""
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from structlab.exam import box as B
+from structlab.exam import links as L
+
+ITEM_HTML = ('<script>Box.prefetchedData = {"item":{"typedID":"f_2540093107114","type":"file","id":2540093107114,'
+             '"description":"","extension":"mp4","name":"04.mp4","itemSize":648927349,"canDownload":%s,'
+             '"isDownloadBlockedByShieldAccessPolicy":false},"permissions":{"can_download":%s,"can_preview":true}},'
+             '"user":{"name":"","email":""}</script>')
+TEXT = "Skip to main content\n04.mp4\nSign up\nLog in\n0:00\n/\n1:24:41\n"
+URL = "https://nihon-u.app.box.com/s/xwdemsrtud01kdv4w7iqrxv2ocdxea3u"
+
+
+def page(can="false", text=TEXT, title="04.mp4 | Powered by Box", final=URL, **kw):
+    return lambda url, **k: {"ok": True, "html": ITEM_HTML % (can, can), "text": text, "title": title,
+                             "final_url": final, **kw}
+
+
+def ok_http(url, **k):
+    return {"ok": True, "status": 200, "error_kind": None}
+
+
+# ---------------- .url からの抽出 ----------------
+@pytest.mark.parametrize("enc,data", [
+    ("utf-8", "[InternetShortcut]\nURL=%s?utm_source=chatgpt.com\n" % URL),
+    ("cp932", "[InternetShortcut]\r\nURL=%s\r\n" % URL),
+    ("utf-16", "[InternetShortcut]\r\nURL=%s\r\n" % URL),
+    ("utf-8-sig", "[InternetShortcut]\nURL=%s\n" % URL),
+])
+def test_url_file_any_encoding(enc, data):
+    recs, log = L.extract_links(data.encode(enc), "第04回.url", "dropbox:/授業動画/第04回.url")
+    assert [r.kind for r in recs] == ["box_shared"]
+    assert recs[0].url == URL  # 追跡用の utm_* は除く
+    assert recs[0].shared_id == "xwdemsrtud01kdv4w7iqrxv2ocdxea3u"
+    assert recs[0].sources == ["dropbox:/授業動画/第04回.url"]
+
+
+def test_broken_url_file_is_reported():
+    recs, log = L.extract_links(b"[InternetShortcut]\nIconIndex=0\n", "x.url", "local:x.url")
+    assert recs == [] and "壊れて" in log["problem"]
+
+
+def test_non_box_and_unsafe_links_are_not_box():
+    assert L.classify_url("https://example.com/s/abc").kind == "other"
+    assert L.classify_url("https://box.com.evil.example/s/abc").kind == "other"
+    assert L.classify_url("https://user:pw@nihon-u.app.box.com/s/abc").kind == "invalid"
+    assert L.classify_url("ftp://nihon-u.app.box.com/s/abc").kind == "invalid"
+    assert L.classify_url("https://nihon-u.box.com/folder/123").kind == "box_other"
+    assert L.classify_url("http://nihon-u.box.com/s/abc").url.startswith("https://")
+
+
+def test_links_in_text_and_dedupe():
+    text = f"第4回の動画: {URL}\n同じ: https://nihon-u.box.com/s/xwdemsrtud01kdv4w7iqrxv2ocdxea3u。\n資料 https://example.com/a"
+    recs, _ = L.extract_links(text.encode(), "案内.txt", "local:案内.txt")
+    recs2, _ = L.extract_links(f"URL={URL}".encode(), "b.url", "local:b.url")
+    d = L.dedupe(recs + recs2)
+    boxes = [r for r in d if r.kind == "box_shared"]
+    assert len(boxes) == 1 and set(boxes[0].sources) == {"local:案内.txt", "local:b.url"}
+
+
+# ---------------- 共有ページの判定 ----------------
+def test_parse_page_reads_only_what_page_shows():
+    m = B.parse_page(ITEM_HTML % ("false", "false"), TEXT, "04.mp4 | Powered by Box", URL)
+    assert m["name"] == "04.mp4" and m["extension"] == "mp4" and m["size"] == 648927349
+    assert m["can_download"] is False and m["can_preview"] is True
+    assert m["duration_sec"] == 5081.0 and m["page_kind"] == "item"
+    # ページ利用者の空の name で上書きしない
+    assert B.parse_page(ITEM_HTML % ("true", "true"), "", "", URL)["name"] == "04.mp4"
+
+
+def test_state_b_preview_only_is_not_reported_as_analyzed(tmp_path):
+    calls = []
+
+    def downloader(*a, **k):
+        calls.append(a)
+        raise AssertionError("ダウンロード禁止なのに取得しようとした")
+
+    c = B.check_link(URL, work_dir=tmp_path, allow_download=True, token="", browser=page("false"), http=ok_http,
+                     downloader=downloader)
+    assert c.state == "B" and not c.analyzable and c.local_path is None and calls == []
+    assert c.name == "04.mp4" and c.duration_text == "1:24:41" and c.can_download is False
+    assert c.alternatives  # 正規の代替手段を示す
+
+
+def test_state_c_metadata_only_when_permission_unknown(tmp_path):
+    html = '<script>{"typedID":"f_1","type":"file","id":1,"description":"","extension":"mp4","name":"a.mp4"}</script>'
+    c = B.check_link(URL, token="", browser=lambda u, **k: {"ok": True, "html": html, "text": "a.mp4", "title": "",
+                                                            "final_url": URL}, http=ok_http)
+    assert c.state == "C" and c.can_download is None and "確認できない" in c.reason
+
+
+def test_state_d_login_and_password(tmp_path):
+    login = lambda u, **k: {"ok": True, "html": "", "text": "Log in to Box\nEmail", "title": "Box | Login",  # noqa: E731
+                            "final_url": "https://account.box.com/login?redirect_url=/s/x"}
+    assert B.check_link(URL, token="", browser=login, http=ok_http).state == "D"
+    pw = lambda u, **k: {"ok": True, "html": "", "text": "This shared link is password-protected", "title": "Box",  # noqa: E731
+                         "final_url": URL, "has_password_input": True}
+    c = B.check_link(URL, token="", browser=pw, http=ok_http)
+    assert c.state == "D" and "パスワード" in c.reason
+
+
+def test_state_e_removed_timeout_network():
+    removed = lambda u, **k: {"ok": True, "html": "", "title": "Box", "final_url": URL,  # noqa: E731
+                              "text": "This shared file or folder link has been removed or is unavailable to you."}
+    assert B.check_link(URL, token="", browser=removed, http=ok_http).state == "E"
+    nf = B.check_link(URL, token="", browser=removed, http=lambda u, **k: {"ok": False, "status": 404,
+                                                                           "error_kind": "not_found"})
+    assert nf.state == "E" and "期限切れ" in nf.reason
+    to = B.check_link(URL, token="", browser=lambda u, **k: {"ok": False, "error_kind": "timeout"},
+                      http=lambda u, **k: {"ok": False, "error_kind": "timeout"})
+    assert to.state == "E" and to.reason == "タイムアウト"
+    net = B.check_link(URL, token="", browser=lambda u, **k: {"ok": False, "error_kind": "network"},
+                       http=lambda u, **k: {"ok": False, "error_kind": "network"})
+    assert "ネットワーク" in net.reason
+
+
+def test_without_playwright_falls_back_without_crashing(monkeypatch):
+    monkeypatch.setattr(B, "browser_available", lambda: {"python_playwright": False, "node_playwright": False,
+                                                         "node": None})
+    r = B.browser_probe(URL)
+    assert r["error_kind"] == "browser_unavailable" and "pip install playwright" in r["error"]
+    c = B.check_link(URL, token="", http=ok_http)  # 既定のブラウザ手段 → 使えない
+    assert c.state == "C" and "ブラウザが無い" in c.reason
+
+
+def test_http_probe_does_not_follow_redirect_outside_box():
+    class Resp:
+        def __init__(self, status, loc=None):
+            self.status_code, self.headers, self.text = status, {"Location": loc} if loc else {}, ""
+            self.is_redirect = loc is not None
+
+    class Sess:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, **k):
+            self.urls.append(url)
+            return Resp(302, "https://evil.example/collect") if "box.com" in url else Resp(200)
+
+    s = Sess()
+    r = B.http_probe(URL, session=s)
+    assert r["error_kind"] == "redirect_outside_box" and s.urls == [URL]
+
+
+def _tiny_mp4(path: Path) -> Path:
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=64x48:d=2",
+                    "-f", "lavfi", "-i", "sine=duration=2", "-shortest", "-c:v", "libx264", "-c:a", "aac",
+                    str(path)], check=True)
+    return path
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg が必要")
+def test_state_a_download_when_allowed_via_api(tmp_path):
+    src = _tiny_mp4(tmp_path / "src.mp4")
+    api = lambda u, t, **k: {"ok": True, "id": "99", "type": "file", "name": "05.mp4", "size": 10,  # noqa: E731
+                             "extension": "mp4", "can_download": True, "can_preview": True}
+
+    def dl(url, token, fid, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dest)
+        return dest
+
+    c = B.check_link(URL, work_dir=tmp_path / "w", allow_download=True, token="tkn", api=api, downloader=dl,
+                     http=ok_http, browser=lambda *a, **k: pytest.fail("API で分かるならブラウザは使わない"))
+    assert c.state == "A" and c.analyzable and Path(c.local_path).exists()
+    # 許可されていても --allow-download が無ければ取得しない
+    c2 = B.check_link(URL, work_dir=tmp_path / "w2", allow_download=False, token="tkn", api=api,
+                      downloader=lambda *a: pytest.fail("取得しない"), http=ok_http)
+    assert c2.state == "C" and "--allow-download" in c2.reason
+
+
+def test_state_f_downloaded_but_broken(tmp_path):
+    def dl(url, token, fid, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"not a video")
+        return dest
+
+    api = lambda u, t, **k: {"ok": True, "id": "1", "type": "file", "name": "x.mp4", "extension": "mp4",  # noqa: E731
+                             "can_download": True}
+    c = B.check_link(URL, work_dir=tmp_path, allow_download=True, token="t", api=api, downloader=dl, http=ok_http)
+    assert c.state == "F" and not c.analyzable
+
+
+def test_api_forbidden_means_auth_required():
+    api = lambda u, t, **k: {"ok": False, "status": 403, "error_kind": "forbidden"}  # noqa: E731
+    c = B.check_link(URL, token="t", api=api, http=ok_http, browser=lambda u, **k: {"ok": False, "error_kind": "browser"})
+    assert c.state == "D"
+
+====================================================================================================
+# ファイル: tests/test_exam_logic.py
+====================================================================================================
+"""試験対策: 手がかり・論点・判定・問題生成・分類の単体テスト（合成データ）。"""
+from __future__ import annotations
+
+import pytest
+
+from structlab.exam import classify as C
+from structlab.exam import cues as Q
+from structlab.exam import questions as G
+from structlab.exam import scoring as S
+from structlab.exam.pipeline import load_config
+
+CFG = load_config()
+PAT = Q.compile_patterns(CFG)
+
+
+def topic(tid="T1", title="残響時間", lectures=(3,), formulas=(), evidence=(), summary="", emphasis=False):
+    return {"id": tid, "subject": "x", "title": title, "lectures": list(lectures), "formulas": list(formulas),
+            "evidence": list(evidence), "summary": summary or title, "terms": [title], "texts": [summary or title],
+            "key_sentences": [summary or title], "sources": [], "emphasis": emphasis}
+
+
+def speech(*lines):
+    return [{"kind": "speech", "start": float(i * 30), "end": float(i * 30 + 10), "text": t} for i, t in enumerate(lines)]
+
+
+@pytest.mark.parametrize("line,typ,pol", [
+    ("鏡像音源法は試験に出します。", "exam_explicit", "+"),
+    ("この式は覚えてください", "memorize", "+"),
+    ("残響時間の式は重要です", "important_formula", "+"),
+    ("これは毎年よく出ます", "frequent", "+"),
+    ("計算できるようにしておいてください", "calc_skill", "+"),
+    ("この問題が解ければ大丈夫です", "sufficient", "+"),
+    ("音の回折は試験には出しません", "exclude", "-"),
+    ("ここは範囲外です", "exclude", "-"),
+    ("前回の説明を訂正します", "correction", "0"),
+    ("小テストで確認します", "quiz", "+"),
+])
+def test_cue_detection(line, typ, pol):
+    cs = Q.find_cues(speech(line), "m", PAT, 3)
+    assert [(c.type, c.polarity) for c in cs] == [(typ, pol)]
+
+
+def test_negation_wins_over_positive_in_same_sentence():
+    cs = Q.find_cues(speech("ここは試験に出ると思ったかもしれませんが試験には出しません"), "m", PAT, 3)
+    assert [c.polarity for c in cs] == ["-"]
+
+
+def test_unresolvable_target_is_left_for_review():
+    cs = Q.find_cues(speech("この式は重要です"), "m", PAT, 3)
+    Q.resolve_targets(cs, [topic(title="音の回折", summary="音は障害物の裏側に回り込む")])
+    assert cs[0].target_topic is None and "要確認" in cs[0].target_note
+
+
+def test_cue_resolves_to_topic_named_in_sentence():
+    ts = [topic("T1", "残響時間"), topic("T2", "音の回折")]
+    cs = Q.find_cues(speech("音の回折は試験には出しません"), "m", PAT, 3)
+    Q.resolve_targets(cs, ts)
+    assert cs[0].target_topic == "T2"
+
+
+def judge(t, cues=(), info=None, unanalyzed=()):
+    return S.score_topic(t, list(cues), info or {}, CFG, list(unanalyzed))
+
+
+def cue_for(t, line, lecture=3, start=0.0):
+    c = Q.find_cues([{"kind": "speech", "start": start, "end": start + 5, "text": line}], "m", PAT, lecture)[0]
+    c.target_topic = t["id"]
+    return c
+
+
+def test_explicit_is_s_and_exclusion_is_c():
+    t = topic()
+    assert judge(t, [cue_for(t, "残響時間は試験に出します")])["grade"] == "S"
+    j = judge(t, [cue_for(t, "残響時間は試験には出しません")])
+    assert (j["grade"], j["sub"]) == ("C", "除外")
+
+
+def test_later_lecture_overrides_earlier_exclusion():
+    t = topic()
+    early_ex = cue_for(t, "ここは試験には出しません", lecture=3)
+    later_in = cue_for(t, "やはり残響時間は試験に出します", lecture=9)
+    assert judge(t, [early_ex, later_in])["grade"] == "S"
+    early_in = cue_for(t, "残響時間は試験に出します", lecture=3)
+    later_ex = cue_for(t, "前回の話ですがここは試験には出しません", lecture=9)
+    assert judge(t, [early_in, later_ex])["grade"] == "C"
+
+
+def test_past_exam_years_make_a_and_scope_excludes():
+    ev = [{"type": "past_exam", "year": 2023, "name": "a"}, {"type": "past_exam", "year": 2024, "name": "b"}]
+    t = topic(evidence=ev)
+    assert judge(t)["grade"] == "A"
+    j = judge(t, info={"scope_lectures": [1, 2]})
+    assert j["grade"] == "C" and j["sub"] == "除外"
+
+
+def test_assignment_alone_is_not_decisive():
+    t = topic(evidence=[{"type": "assignment", "name": "課題"}])
+    assert judge(t)["grade"] == "B"
+
+
+def test_unanalyzed_material_prevents_c():
+    t = topic()
+    assert judge(t)["grade"] == "C"
+    j = judge(t, unanalyzed=[{"name": "第03回.mp4", "lecture": 3, "why": "再生のみ可"}])
+    assert (j["grade"], j["sub"]) == ("B", "要確認") and any(u["type"] == "unanalyzed" for u in j["unknowns"])
+    other = judge(t, unanalyzed=[{"name": "第09回.mp4", "lecture": 9, "why": "未取得"}])
+    assert other["grade"] == "C"  # 別の講義回の未解析は、この論点の判定に影響しない
+
+
+def test_no_probability_percentages_in_judgment():
+    t = topic(evidence=[{"type": "past_exam", "year": 2024, "name": "a"}])
+    assert "%" not in str(judge(t))
+
+
+def test_manual_override_keeps_auto_grade():
+    t = topic()
+    j = S.apply_overrides(t, judge(t), {"残響時間": {"grade": "A", "reason": "先生がプリントで指示"}})
+    assert j["grade"] == "A" and j["auto_grade"] == "C" and "手動修正" in j["reason"]
+
+
+# ---------------- 問題 ----------------
+def test_calc_question_is_verified_and_marks_system_values():
+    t = topic(formulas=["T = 0.16V/A"], summary="T：残響時間 [s]、V：室容積 [m3]、A：等価吸音面積 [m2]")
+    qs = G.calc_questions(t)
+    assert qs and qs[0]["verified"] and "システムが設定" in qs[0]["note"]
+    assert "残響時間" in qs[0]["symbols"][0] and qs[0]["answer"].endswith("s")
+    v = G.calc_questions(t, variant=1)[0]
+    assert v["prompt"] != qs[0]["prompt"] and v["verified"]
+
+
+@pytest.mark.parametrize("f,ok", [("Z = bh²/6", True), ("σ = M/Z", True), ("I = bh^3/12", True),
+                                  ("Z = bh2/6", False), ("音圧 = 大きい", False), ("a = b = c", False)])
+def test_formula_parsing_refuses_ambiguous(f, ok):
+    assert (G.parse_formula(f) is not None) == ok
+
+
+def test_superscript_is_power():
+    eq, lhs, _ = G.parse_formula("Z = bh²/6")
+    import sympy as sp
+    b, h = sp.symbols("b h")
+    assert sp.simplify(eq.rhs - b * h ** 2 / 6) == 0
+
+
+def test_question_set_and_mocks():
+    ts = [topic("T1", "残響時間", formulas=["T = 0.16V/A"],
+                summary="音を止めてから音圧レベルが60dB減衰するまでの時間を残響時間という。"),
+          topic("T2", "鏡像音源法", summary="反射面に対して音源と対称な位置に鏡像音源を置く方法を鏡像音源法という。"),
+          topic("T3", "吸音率", summary="吸音率は入射した音のエネルギーのうち反射しなかった割合である。")]
+    j = {t["id"]: {"grade": g, "score": s, "past_exam_years": []} for t, g, s in zip(ts, "SAA", (20, 10, 8))}
+    ex = G.mock_exams(ts, j, {})
+    assert [e["no"] for e in ex] == [1, 2, 3]
+    for e in ex:
+        assert e["questions"] and sum(q["points"] for q in e["questions"]) == 100
+        assert "仮設定" in e["provisional"]
+    assert any(q["type"] == "calc" for q in ex[2]["questions"])
+
+
+# ---------------- 分類 ----------------
+def mat(mid, name, folder="", role="slides"):
+    return {"id": mid, "name": name, "folder": folder, "role": role, "source": f"local:{folder}/{name}"}
+
+
+def test_classify_by_catalog_folder_content_and_unknown():
+    cat = [{"name": "環境工学Ⅳ", "aliases": ["環境工学4"], "keywords": ["残響時間", "吸音率", "音圧レベル"]},
+           {"name": "鉄筋コンクリート構造Ⅱ", "keywords": ["曲げ耐力", "中立軸", "引張鉄筋"]}]
+    mats = [mat("a", "第03回_資料.pdf", "環境工学4"),           # 別表記のフォルダ名
+            mat("b", "lec5.pdf", "授業動画"),                    # 名前に科目なし → 内容（用語）から
+            mat("c", "メモ.pdf", ""),                            # 判断できない
+            mat("d", "04.mp4", "建築設備Ⅲ/授業動画")]            # 一覧に無い科目 → フォルダ名
+    rd = {"a": {"units": [{"kind": "page", "text": "残響時間と吸音率"}]},
+          "b": {"units": [{"kind": "page", "text": "中立軸 曲げ耐力 引張鉄筋 の計算"}]},
+          "c": {"units": [{"kind": "page", "text": "買い物"}]}, "d": {"units": []}}
+    r = C.classify(mats, rd, cat)
+    assert r["a"]["subject"] == "環境工学Ⅳ" and r["a"]["lecture"] == 3
+    assert r["b"]["subject"] == "鉄筋コンクリート構造Ⅱ" and r["b"]["lecture"] == 5
+    assert r["c"]["subject"] == C.UNKNOWN
+    assert r["d"]["subject"] == "建築設備Ⅲ" and r["d"]["lecture"] == 4
+
+
+def test_ai_must_stay_disabled(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("ai:\n  enabled: true\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        load_config(p)
+
+
+def test_named_topic_beats_screen_at_scene_boundary():
+    """場面の切り替わり（60 秒）の発言でも、文中で名指しした論点に結びつける（CI の OCR ありで見つかった不具合）。"""
+    ts = [topic("T1", "音の反射"), topic("T2", "鏡像音源法")]
+    cs = Q.find_cues([{"kind": "speech", "start": 60.0, "end": 70.0, "text": "鏡像音源法は試験に出します"}], "m", PAT, 3)
+    Q.resolve_targets(cs, ts, slide_for_time=lambda mid, t: "T1")
+    assert cs[0].target_topic == "T2" and cs[0].target_note == "文中に論点名"
+    cs = Q.find_cues([{"kind": "speech", "start": 60.0, "end": 70.0, "text": "この式は重要です"}], "m", PAT, 3)
+    Q.resolve_targets(cs, ts, slide_for_time=lambda mid, t: "T1")
+    assert cs[0].target_topic == "T1"  # 名指しが無ければ画面のスライド
+
+====================================================================================================
+# ファイル: tests/test_exam_pipeline.py
+====================================================================================================
+"""試験対策: 合成データでの全工程（発見 → Box → 読み取り → 判定 → 教材 → 差分更新・再開）。"""
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+import exam_synth
+from structlab.exam import box as B
+from structlab.exam import cli
+from structlab.exam.pipeline import Options, run
+
+SECRET = "BOXSECRET-0123456789"
+FAKE_HTML = ('<script>{"typedID":"f_7","type":"file","id":7,"description":"","extension":"mp4","name":"04.mp4",'
+             '"itemSize":1000,"canDownload":false,"can_download":false,"can_preview":true}</script>')
+
+
+@pytest.fixture
+def fake_box(monkeypatch):
+    calls = []
+
+    def browser(url, **k):
+        calls.append(url)
+        return {"ok": True, "html": FAKE_HTML, "text": "04.mp4\n0:00\n/\n1:30:00", "title": "04.mp4 | Powered by Box",
+                "final_url": url}
+
+    monkeypatch.setattr(B, "browser_probe", browser)
+    monkeypatch.setattr(B, "http_probe", lambda url, **k: {"ok": True, "status": 200})
+    # 大学の共有リンクは個人の Box トークンでは参照できない場合がある（API では見つからない）
+    monkeypatch.setattr(B, "api_probe", lambda url, token, **k: {"ok": False, "error_kind": "not_found", "status": 404})
+    monkeypatch.setenv("BOX_ACCESS_TOKEN", SECRET)
+    return calls
+
+
+@pytest.fixture(scope="module")
+def synth(tmp_path_factory):
+    root = tmp_path_factory.mktemp("exam")
+    exam_synth.build(root / "input", video=bool(shutil.which("ffmpeg")))
+    return root
+
+
+def opts(root: Path, **kw) -> Options:
+    return Options(input_dir=root / "input", work=root / "work", out=root / "out", log=lambda *a: None, **kw)
+
+
+def pdf_text(p: Path) -> str:
+    import pymupdf
+    with pymupdf.open(str(p)) as d:
+        return "".join(pg.get_text() for pg in d).replace("\n", "")
+
+
+def all_text(root: Path) -> str:
+    out = []
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix in (".json", ".csv", ".jsonl", ".txt"):
+            out.append(p.read_text(encoding="utf-8", errors="replace"))
+        elif p.is_file() and p.suffix == ".pdf":
+            out.append(pdf_text(p))
+    return "\n".join(out)
+
+
+def test_full_run(synth, fake_box):
+    rep = run(opts(synth))
+    env = rep["subjects"]["環境工学Ⅳ"]
+    base = synth / "out" / "科目一覧" / "環境工学Ⅳ" / "試験対策"
+    # 教材一式（22-3）
+    for name in ["最重要事項", "徹底対策資料", "公式一覧", "予想問題", "解答用紙", "解答解説"]:
+        assert (base / f"{name}.pdf").exists() and (base / f"{name}.docx").exists()
+    for n in (1, 2, 3):
+        for part in ("問題", "解答用紙", "解答解説"):
+            assert (base / f"模擬テスト第{n}回" / f"{part}.pdf").exists()
+    assert env["mock_exams"] == 3 and env["quality_problems"] == [] and env["calc_verified"]
+    led = json.loads((base / "出題根拠.json").read_text(encoding="utf-8"))
+    g = {t["title"]: (t["grade"], t["grade_sub"]) for t in led["topics"]}
+    assert g["鏡像音源法"][0] == "S"
+    assert g["残響時間"][0] == "A"
+    assert g["音の回折"] == ("C", "除外")
+    assert g["吸音率"][0] == "B"
+    assert led["scope_lectures"] == [1, 2, 3, 4, 5] and led["past_exam_years"] == [2023, 2024]
+    rev = next(t for t in led["topics"] if t["title"] == "残響時間")
+    assert rev["past_exam_years"] == [2023, 2024] and "%" not in json.dumps(rev, ensure_ascii=False)
+    # 問題用紙に重要度を出さない／B・C の詳しい解説を混ぜない
+    for n in (1, 2, 3):
+        t = pdf_text(base / f"模擬テスト第{n}回" / "問題.pdf")
+        assert "重要度" not in t and "S（" not in t and "仮設定" in t
+    deep = pdf_text(base / "徹底対策資料.pdf")
+    assert "鏡像音源法" in deep and "音の回折" not in deep and "吸音率" not in deep
+    assert "音の回折" in pdf_text(base / "判定一覧.pdf")  # B・C は判定一覧に題名と理由だけ
+    # 計算問題は sympy で検算済み・例題の値であることを明示
+    sol = pdf_text(base / "解答解説.pdf")
+    assert "両辺が一致" in sol and "システムが設定した例題の値" in sol
+
+
+def test_box_and_unanalyzed_are_visible(synth, fake_box):
+    run(opts(synth))
+    box_csv = (synth / "out" / "Boxリンク管理" / "動画取得可否一覧.csv").read_text(encoding="utf-8-sig")
+    assert "synthetictest0001" in box_csv and ",B," in box_csv and "不可" in box_csv
+    led = json.loads((synth / "out" / "科目一覧" / "環境工学Ⅳ" / "試験対策" / "出題根拠.json").read_text("utf-8"))
+    un = {u["name"]: u for u in led["unanalyzed"]}
+    assert "第04回" in un and "再生のみ可" in un["第04回"]["why"] and un["第04回"]["lecture"] == 4
+    assert "未解析" in pdf_text(synth / "out" / "科目一覧" / "環境工学Ⅳ" / "試験対策" / "最重要事項.pdf")
+
+
+def test_duplicates_and_unclassified(synth, fake_box):
+    rep = run(opts(synth))
+    dups = rep["stages"]["discover"]["duplicates"]
+    assert any("コピー" in d["duplicate"] for d in dups)
+    un = json.loads((synth / "out" / "未分類・要確認" / "一覧.json").read_text("utf-8"))
+    assert [u["name"] for u in un] == ["メモ.pdf"]
+    assert "要確認" in rep["subjects"]
+    # 別科目の内容が混ざらない
+    rc = json.loads((synth / "out" / "科目一覧" / "鉄筋コンクリート構造Ⅱ" / "試験対策" / "出題根拠.json").read_text("utf-8"))
+    assert not any("残響" in t["title"] for t in rc["topics"])
+
+
+def test_secrets_never_reach_outputs(synth, fake_box):
+    run(opts(synth))
+    assert SECRET not in all_text(synth / "out") and SECRET not in all_text(synth / "work")
+
+
+def test_rerun_reuses_readings_and_skips_unchanged(synth, fake_box, monkeypatch):
+    run(opts(synth))
+    from structlab.exam import analyze
+    monkeypatch.setattr(analyze, "read_material", lambda *a, **k: pytest.fail("読み取り済みの資料を読み直した"))
+    rep = run(opts(synth))
+    assert rep["subjects"]["環境工学Ⅳ"]["rendered"] is False
+    assert fake_box == [] or len(fake_box) <= 1  # Box の確認結果は一定時間再利用する
+
+
+def test_new_material_updates_grade_and_history(tmp_path, fake_box):
+    root = tmp_path
+    exam_synth.build(root / "input", video=False)
+    run(opts(root))
+    # 後日の授業（第5回）で吸音率の出題が明言された
+    (root / "input" / "環境工学Ⅳ" / "第05回_授業.vtt").write_text(exam_synth.vtt([
+        (10, 20, "吸音率は試験に出します。必ず計算できるようにしてください。")]), encoding="utf-8")
+    rep = run(opts(root))
+    led = json.loads((root / "out" / "科目一覧" / "環境工学Ⅳ" / "試験対策" / "出題根拠.json").read_text("utf-8"))
+    assert next(t for t in led["topics"] if t["title"] == "吸音率")["grade"] == "S"
+    ch = rep["subjects"]["環境工学Ⅳ"]["history_changes"]
+    assert {"topic": "吸音率", "from": "B", "to": "S"}.items() <= next(c for c in ch if c["topic"] == "吸音率").items()
+    hist = (root / "work" / "history.jsonl").read_text("utf-8")
+    assert "吸音率" in hist
+    # 原本は変更しない
+    assert (root / "input" / "環境工学Ⅳ" / "第03回_講義資料.pdf").exists()
+
+
+def test_resume_after_interruption(tmp_path, fake_box, monkeypatch):
+    exam_synth.build(tmp_path / "input", video=False)
+    from structlab.exam import analyze
+    real = analyze.read_material
+    n = {"calls": 0}
+
+    def crash_after_two(*a, **k):
+        n["calls"] += 1
+        if n["calls"] > 2:
+            raise KeyboardInterrupt("途中停止")
+        return real(*a, **k)
+
+    monkeypatch.setattr(analyze, "read_material", crash_after_two)
+    with pytest.raises(KeyboardInterrupt):
+        run(opts(tmp_path))
+    done = len(list((tmp_path / "work" / "readings").glob("*.json")))
+    assert done == 2
+    monkeypatch.setattr(analyze, "read_material", real)
+    calls = {"n": 0}
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(analyze, "read_material", counting)
+    rep = run(opts(tmp_path))
+    assert rep["subjects"]["環境工学Ⅳ"]["mock_exams"] == 3
+    total = len(list((tmp_path / "work" / "readings").glob("*.json")))
+    assert calls["n"] == total - 2  # 読み取り済みの 2 件は読み直さない
+
+
+def test_cli_requires_input_and_box_check(tmp_path, fake_box, capsys):
+    assert cli.main(["run", "--work", str(tmp_path / "w"), "--out", str(tmp_path / "o")]) == 2
+    u = tmp_path / "第04回.url"
+    u.write_text("[InternetShortcut]\nURL=https://nihon-u.app.box.com/s/synthetictest0001\n", encoding="utf-8")
+    assert cli.main(["box-check", str(u), "--work", str(tmp_path / "w"), "--json", str(tmp_path / "r.json")]) == 0
+    r = json.loads((tmp_path / "r.json").read_text("utf-8"))
+    assert r[0]["state"] == "B" and r[0]["name"] == "04.mp4"
+    assert "[B] 再生のみ可" in capsys.readouterr().out
+
+
+def test_dropbox_failure_is_reported(tmp_path, monkeypatch, capsys):
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_REFRESH_TOKEN", "DROPBOX_ACCESS_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DROPBOX_REFRESH_TOKEN_FILE", str(tmp_path / "none"))
+    monkeypatch.setenv("DROPBOX_APP_KEY_FILE", str(tmp_path / "none"))
+    rc = cli.main(["run", "--dropbox-root", "/授業", "--work", str(tmp_path / "w"), "--out", str(tmp_path / "o")])
+    assert rc == 3 and "Dropbox に接続できません" in capsys.readouterr().err
+
+
+class FakeDropboxOut:
+    """DropboxOutput の代わり（ローカルのフォルダに保存）。"""
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def upload(self, local: Path, rel: str) -> None:
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(local.read_bytes())
+
+    def download_if_exists(self, rel: str, local: Path) -> bool:
+        p = self.root / rel
+        if not p.exists():
+            return False
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(p.read_bytes())
+        return True
+
+
+def test_dropbox_state_roundtrip_resumes_on_fresh_runner(tmp_path, fake_box, monkeypatch):
+    """GitHub Actions では毎回まっさらな環境になる。Dropbox に置いた状態から続きを再開する。"""
+    from structlab.exam import analyze, sync
+    exam_synth.build(tmp_path / "input", video=False)
+    dst = FakeDropboxOut(tmp_path / "dropbox")
+    run(opts(tmp_path))
+    n = sync.save_state(dst, tmp_path / "work")
+    assert n > 0 and sync.upload_outputs(dst, tmp_path / "out") > 0
+    assert (tmp_path / "dropbox" / "試験対策システム" / "科目一覧" / "環境工学Ⅳ" / "試験対策" / "最重要事項.pdf").exists()
+    shutil.rmtree(tmp_path / "work")  # 新しい実行環境
+    assert sync.restore_state(dst, tmp_path / "work")
+    monkeypatch.setattr(analyze, "read_material", lambda *a, **k: pytest.fail("復元した読み取り結果を使っていない"))
+    rep = run(opts(tmp_path))
+    assert rep["subjects"]["環境工学Ⅳ"]["mock_exams"] == 3
+
+
+def test_quiet_summary_hides_names_and_urls(synth, fake_box, capsys):
+    rc = cli.main(["run", "--input", str(synth / "input"), "--work", str(synth / "work"), "--out",
+                   str(synth / "out"), "--quiet", "--no-docx"])
+    out = capsys.readouterr().out
+    assert rc == 0 and '"subjects": 2' in out
+    for secret_ish in ("環境工学", "鉄筋", "第03回", "box.com", "メモ", SECRET):
+        assert secret_ish not in out
+
+====================================================================================================
+# ファイル: tests/test_restore_dump.py
+====================================================================================================
+"""tools/restore_dump.py: 全文ダンプからのファイル復元。"""
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("restore_dump", Path(__file__).parents[1] / "tools" / "restore_dump.py")
+rd = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rd)
+SEP = "=" * 100
+
+
+def block(path, body):
+    return f"{SEP}\n# ファイル: {path}\n{SEP}\n{body}\n"
+
+
+def test_restore_paths_contents_and_notes(tmp_path):
+    body_with_sep_like = f'x = "{SEP}"\n# ファイル: これは本文\nprint(x)'  # 3 行組でなければ区切りではない
+    dump = "# 見出し\n\n" + block("a/b.py", body_with_sep_like) + block("c.md  ※注記つき", "hello") + block("a/b.py", "dup")
+    (tmp_path / "d.txt").write_text(dump, encoding="utf-8")
+    out = tmp_path / "out"
+    assert rd.main([str(tmp_path / "d.txt"), str(out), "--manifest", str(tmp_path / "m.json")]) == 0
+    assert (out / "a/b.py").read_text(encoding="utf-8") == body_with_sep_like + "\n"
+    assert (out / "c.md").read_text(encoding="utf-8") == "hello\n"
+    import json
+    m = json.loads((tmp_path / "m.json").read_text(encoding="utf-8"))
+    assert m["duplicates"] == [{"path": "a/b.py", "same": False}]
+    assert next(r for r in m["restored"] if r["path"] == "c.md")["note"] == "注記つき"
+
+
+def test_never_overwrites_and_rejects_unsafe(tmp_path):
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "keep.txt").write_text("orig", encoding="utf-8")
+    (tmp_path / "d.txt").write_text(block("keep.txt", "new") + block("../evil.txt", "x"), encoding="utf-8")
+    rd.main([str(tmp_path / "d.txt"), str(tmp_path / "out"), "--manifest", str(tmp_path / "m.json")])
+    assert (tmp_path / "out" / "keep.txt").read_text(encoding="utf-8") == "orig"
+    assert not (tmp_path / "evil.txt").exists()
+
