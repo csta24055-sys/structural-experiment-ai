@@ -1,0 +1,54 @@
+{
+ "source": "2c9491a5-1_____________.txt",
+ "restored": [
+  {
+   "path": "src/structlab/deliver/__init__.py",
+   "lines": 0,
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+   "path": "src/structlab/deliver/rc_beam.py",
+   "lines": 223,
+   "sha256": "e62fa406a864bbf573add5a33da38612cb5520e3fe82cca471734fb7a85d67e9"
+  },
+  {
+   "path": "src/structlab/deliver/excel.py",
+   "lines": 218,
+   "sha256": "efce76ba86e16d3f5801487dd53116643c2f18bb0bf68678c978cabc1126787e"
+  },
+  {
+   "path": "src/structlab/deliver/report.py",
+   "lines": 420,
+   "sha256": "223c7f2c21bf9cc9af701e39c0bbcd6e8dafdeff5015d87d4527aedd743bbe45"
+  },
+  {
+   "path": "scripts/deliver.py",
+   "lines": 85,
+   "sha256": "9a5b998f5ab32bf1a9b22a9a0a3f4e59e23c39813b23a20c2d88943a9a1bc62a"
+  },
+  {
+   "path": "tests/rc_synth.py",
+   "lines": 23,
+   "sha256": "e0ff6d2b651d0b9b8130e638cf82e6ec78f63c6983cf5f47f850984a5ea167a3"
+  },
+  {
+   "path": "tests/test_deliver.py",
+   "lines": 87,
+   "sha256": "f8f20b8c8f86900ee1e7e4ed2bce2474ef1008302129b690c34ec4c1956cb90c"
+  },
+  {
+   "path": "scratchpad/make_content_before_style.py",
+   "lines": 386,
+   "sha256": "8f53b24fa7f5c74cf8a154606a2c1e6ecdd5ab30dd84e5ec7a56ca46b404da58",
+   "note": "本文 content.json を作るスクリプト。最初の版は上書きされて残っておらず、これは文章調整の直前の版（最初の版に修正 2 回を加えたもの）"
+  },
+  {
+   "path": "scratchpad/make_content.py",
+   "lines": 386,
+   "sha256": "58d6bfb72d918b2153848fc3dabd9c305680c11e0f8b17f498189d1d36177d24",
+   "note": "同上の最新版（文章表現の最終調整後）。参考"
+  }
+ ],
+ "skipped": [],
+ "duplicates": []
+}

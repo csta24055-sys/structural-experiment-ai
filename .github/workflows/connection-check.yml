@@ -1,0 +1,62 @@
+# Dropbox と Claude API の接続確認（読み取りのみ・課金なし）。Dropbox には何も書き込みません。
+# 起動方法:
+#   - ops/requests/connection-check.txt を変更して push（Claude Code が代わりに行えます。どのブランチでも動きます）
+#   - 既定ブランチに取り込んだ後は、GitHub の Actions タブ → Connection check → Run workflow
+# 秘密情報は Secrets から環境変数として渡すだけで、表示・保存しません（GitHub がログ上でも伏せ字にします）。
+name: Connection check
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_samples:
+        description: "動画・PDF・Excel を1件ずつ取得して読めるか確認する（終了時に削除）"
+        type: boolean
+        default: true
+  push:
+    paths:
+      - "ops/requests/connection-check.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connection-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      # Claude API キーは ANTHROPIC_API_KEY の名前を推奨。別名で登録済みでも使えるようにする
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CLAUDE_API_KEY || secrets.ANTHROPIC_KEY || secrets.CLAUDE_KEY }}
+      # 登録の有無だけ（true/false）。値ではない
+      SECRET_SET_DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY != '' }}
+      SECRET_SET_DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET != '' }}
+      SECRET_SET_DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN != '' }}
+      SECRET_SET_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      SECRET_SET_CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY != '' }}
+      SECRET_SET_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY != '' }}
+      SECRET_SET_CLAUDE_KEY: ${{ secrets.CLAUDE_KEY != '' }}
+      STRUCTLAB_CONFIG: configs/dropbox.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg
+      - name: Python packages
+        run: |
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q -e .
+      - name: Connection check
+        run: |
+          FLAGS=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.download_samples }}" = "false" ]; then FLAGS="--no-download"; fi
+          python -m structlab -c "$STRUCTLAB_CONFIG" connect-check $FLAGS

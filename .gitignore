@@ -218,3 +218,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- structlab（試験対策システム） ---
+# 作業ディレクトリ（SQLite・解析結果・取得した動画・一時ファイル）
+work/
+output/
+# 本人の文章スタイルPDFとその読み取り結果
+*writing_style*.pdf
+# 設定・認証情報（config.example.yaml をコピーして使う）
+config.yaml
+.env
+*.token
+# 授業動画・音声をリポジトリに入れない
+*.mp4
+*.mov
+*.m4v
+*.mkv
+*.webm
+*.wav
+*.mp3

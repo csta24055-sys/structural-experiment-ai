@@ -1,0 +1,193 @@
+# 資料の読み取り基盤（structlab read）を全資料に対して実行する。Dropbox は読み取りのみで、何も書き込まない。
+# 結果（棚卸し・資料ごとの書き起こし・照合・見積もり・場面の画像）は GitHub Actions の成果物（Artifacts、30日で削除）に置く。
+# 読み取り結果は内容のハッシュごとにキャッシュし、同じ資料は読み直さない（AI の結果も再送しない）。
+# 最後に資料をまたぐ整理（重複・差分、先生の実験経過 1→2 の時間軸、生徒の表裏の観察、先生と生徒の対応）を行う。
+# 起動: ops/requests/reading.txt を変更して push（Claude Code が行う）
+#   allow_external_ai: true は有料（Claude による画像の書き起こし・用語の訂正）。見積もりを利用者が承認した後だけ
+name: Read materials
+
+on:
+  push:
+    paths:
+      - "ops/requests/reading.txt"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: read-materials
+  cancel-in-progress: false
+
+env:
+  STRUCTLAB_CONFIG: configs/dropbox.yaml
+  DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+  DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+  DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      targets: ${{ steps.t.outputs.targets }}
+      allow_ai: ${{ steps.t.outputs.allow_ai }}
+      count_tokens: ${{ steps.t.outputs.count_tokens }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q -e .
+      - id: t
+        run: |
+          echo "targets=$(python -m structlab -c "$STRUCTLAB_CONFIG" read --list-targets)" >> "$GITHUB_OUTPUT"
+          AI=$(sed -n 's/^allow_external_ai:[[:space:]]*\(true\|false\).*/\1/p' ops/requests/reading.txt | head -1)
+          echo "allow_ai=${AI:-false}" >> "$GITHUB_OUTPUT"
+          CT=$(sed -n 's/^count_tokens:[[:space:]]*\(true\|false\).*/\1/p' ops/requests/reading.txt | head -1)
+          echo "count_tokens=${CT:-false}" >> "$GITHUB_OUTPUT"
+
+  read:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CLAUDE_API_KEY || secrets.ANTHROPIC_KEY || secrets.CLAUDE_KEY }}
+      TARGET: ${{ matrix.target.path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg tesseract-ocr tesseract-ocr-jpn
+      - name: Cache Whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ runner.os }}-large-v3-turbo-and-large-v3
+      - name: Python packages
+        run: |
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q -e . faster-whisper
+      - name: Restore earlier reading of this file
+        uses: actions/cache/restore@v4
+        with:
+          path: work/reading
+          key: reading-${{ matrix.target.key }}-${{ github.run_id }}
+          # 同じ内容・同じ設定の読み取り → 無ければ同じ内容の以前の読み取り（設定が変わった部分だけ読み直す）
+          restore-keys: |
+            reading-${{ matrix.target.key }}-
+            reading-${{ matrix.target.base }}-
+      - name: Read
+        run: |
+          FLAGS=""
+          if [ "${{ needs.plan.outputs.allow_ai }}" = "true" ]; then FLAGS="--allow-external-ai"; fi
+          # 入力トークンの実測（count_tokens。推論しないので課金なし）
+          if [ "${{ needs.plan.outputs.count_tokens }}" = "true" ]; then FLAGS="$FLAGS --count-tokens"; fi
+          python -m structlab -c "$STRUCTLAB_CONFIG" read --only "$TARGET" --out work/reading $FLAGS
+      - name: Save reading of this file
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          # 拡大画像（derived）は元の解像度の画像からいつでも作り直せるので保存しない
+          path: |
+            work/reading
+            !work/reading/**/derived
+          key: reading-${{ matrix.target.key }}-${{ github.run_id }}
+      - name: Artifact name
+        if: always()
+        id: n
+        run: echo "name=reading-$(echo -n "$TARGET" | sha1sum | cut -c1-10)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.n.outputs.name }}
+          path: |
+            work/reading
+            !work/reading/**/derived
+          retention-days: 30
+          if-no-files-found: warn
+
+  summary:
+    needs: [plan, read]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CLAUDE_API_KEY || secrets.ANTHROPIC_KEY || secrets.CLAUDE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reading-*
+          path: results
+      - name: Summary
+        run: |
+          PYTHONPATH=src python -m structlab.reading.merge results | tee -a "$GITHUB_STEP_SUMMARY"
+          echo; echo "== 棚卸し"; cat "$(ls results/*/inventory.md | head -1)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Across materials (duplicates, teacher 1→2 timeline, student faces, correspondence)
+        run: |
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q -e .
+          FLAGS=""
+          if [ "${{ needs.plan.outputs.allow_ai }}" = "true" ]; then FLAGS="--allow-external-ai"; fi
+          python -m structlab.reading.corpus results --out corpus -c "$STRUCTLAB_CONFIG" $FLAGS | tee -a "$GITHUB_STEP_SUMMARY"
+          cp results/*/inventory.md corpus/ 2>/dev/null || true
+          PYTHONPATH=src python -m structlab.reading.merge results > corpus/summary_all.md
+      - name: Restore earlier meaning results (resume; identical inputs are not sent again)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            corpus/semantic_run/semantic.db
+            corpus/semantic_run/semantic_batch_state.json
+          key: semantic-${{ github.run_id }}
+          restore-keys: |
+            semantic-
+      - name: Meaning and directives (3 passes, rules always; AI only when allowed)
+        run: |
+          FLAGS=""
+          if [ "${{ needs.plan.outputs.allow_ai }}" = "true" ]; then FLAGS="--allow-external-ai"; fi
+          python -m structlab.reading.semantic_bridge results --out corpus/semantic_run -c "$STRUCTLAB_CONFIG" $FLAGS
+      - name: Save meaning results
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            corpus/semantic_run/semantic.db
+            corpus/semantic_run/semantic_batch_state.json
+          key: semantic-${{ github.run_id }}
+      - name: Cost breakdown (where the cost arises; no API calls)
+        if: always()
+        run: |
+          python -m structlab -c "$STRUCTLAB_CONFIG" cost --reading results --semantic-db corpus/semantic_run/semantic.db \
+            --out corpus/costs | tee -a "$GITHUB_STEP_SUMMARY" || true
+      - name: GitHub Actions usage (minutes of this run; counted as cost)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/actions_usage.py --out corpus/costs/actions_usage.json | tee -a "$GITHUB_STEP_SUMMARY" || true
+      - name: Requirements ledger (user instructions + teacher directives)
+        if: always()
+        run: |
+          python -m structlab -c "$STRUCTLAB_CONFIG" requirements verify --stage analysis --reading results \
+            --corpus corpus --semantic corpus/semantic_run --out corpus/requirements | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reading-corpus
+          path: corpus
+          retention-days: 30
+          if-no-files-found: warn

@@ -1,0 +1,8 @@
+# 任意機能。必要なものだけインストールしてください。
+# 動画音声のローカル文字起こし（外部送信なし。初回にモデルを Hugging Face からダウンロード）
+faster-whisper>=1.0
+# ローカルOCR: pip ではなく OS に tesseract-ocr と tesseract-ocr-jpn を入れる（本ツールは tesseract コマンドを直接呼ぶ）
+
+# システムコマンド（pip ではなく OS パッケージ）:
+#   ffmpeg / ffprobe   … 動画処理に必須（apt-get install ffmpeg）
+#   tesseract-ocr, tesseract-ocr-jpn … ローカルOCRを使う場合
