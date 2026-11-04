@@ -1,0 +1,20 @@
+{
+ "project": "my-project",
+ "remote": "origin",
+ "branch": "",
+ "state_file": "AUTORESUME_STATE.json",
+ "log_file": "AUTORESUME_LOG.md",
+ "private_dir": ".claude/autoresume/run",
+ "timezone_offset_hours": 9,
+ "thresholds": {"prepare": 85, "stop": 90},
+ "window_hours": 5,
+ "weekly_fallback_hours": 169,
+ "wake_margin_min": 5,
+ "statusline_max_age_min": 15,
+ "lock_stale_hours": 3,
+ "progress_files": [],
+ "test_command": "",
+ "resume_task": "continue the unfinished items in the progress files",
+ "commit_trailer": "",
+ "schedule": {"backend": "claude-remote", "primary_trigger_id": "", "backup_trigger_id": "", "weekly_trigger_id": ""}
+}

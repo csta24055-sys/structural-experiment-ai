@@ -1,0 +1,32 @@
+{
+ "project": "structural-experiment-ai（建築構造実験の資料解析・自動化）",
+ "remote": "origin",
+ "branch": "claude/claude-code-autoresume-port-oa7pwb",
+ "state_file": "AUTORESUME_STATE.json",
+ "log_file": "AUTORESUME_LOG.md",
+ "private_dir": ".claude/autoresume/run",
+ "timezone_offset_hours": 9,
+ "thresholds": {
+  "prepare": 85,
+  "stop": 90
+ },
+ "window_hours": 5,
+ "weekly_fallback_hours": 169,
+ "wake_margin_min": 5,
+ "statusline_max_age_min": 15,
+ "lock_stale_hours": 3,
+ "progress_files": [
+  "PROGRESS.md",
+  "AUTORESUME_LOG.md"
+ ],
+ "test_command": "python3 -m pytest -q; c=$?; [ $c -eq 0 ] || [ $c -eq 5 ]",
+ "resume_task": "PROGRESS.md の「次の作業」を上から順に実施する。完了済み項目はやり直さない。実験生データや個人情報はコミットしない。「次の作業」がユーザー入力待ちの項目しか無い場合は、作業を捏造せず AUTORESUME_LOG.md に記録し、plan-wake で再予約する代わりにこのプロジェクトの3件の起動予約を update_trigger enabled=false で止めて終了する。",
+ "commit_trailer": "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01GV7Ln8po4hMxoWYmq49qZY",
+ "schedule": {
+  "backend": "claude-remote",
+  "primary_trigger_id": "trig_01Wgq3pthHL8ZMdqeNqHv2hH",
+  "backup_trigger_id": "trig_012iSXEygHhy7ArKbjvh4vA3",
+  "weekly_trigger_id": "trig_01LR9yTiMjxMAnCTptQfjKxv"
+ },
+ "install_scope": "user"
+}
