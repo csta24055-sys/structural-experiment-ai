@@ -1,18 +1,22 @@
 {
  "window": {
-  "start_ts": 1793756301.4343019,
+  "start_ts": 1793774644.3724484,
   "basis": "estimated: start of this run",
-  "start": "2026-11-04T10:38+09:00"
+  "start": "2026-11-04T15:44+09:00"
  },
  "last_run": {
-  "id": "run-20261104-install",
-  "started_ts": 1793756301.4343019,
-  "started": "2026-11-04T10:38+09:00"
+  "id": "run-20261104-1544",
+  "started_ts": 1793774644.3724484,
+  "started": "2026-11-04T15:44+09:00"
  },
  "runs": [
   {
    "id": "run-20261104-install",
    "started": "2026-11-04T10:38+09:00"
+  },
+  {
+   "id": "run-20261104-1544",
+   "started": "2026-11-04T15:44+09:00"
   }
  ],
  "tool": "cc-autoresume 1.0.0",
@@ -25,22 +29,21 @@
   "planned_at": "2026-11-04T10:38+09:00"
  },
  "checkpoint": {
-  "at": "2026-11-04T10:39+09:00",
-  "run": "run-20261104-install",
+  "at": "2026-11-04T15:44+09:00",
+  "run": "run-20261104-1544",
   "done": [
-   "cc-autoresume 1.0.0 を導入（user scope、しきい値 85/90%、推定方式）",
-   "一回限りの起動予約3件を作成"
+   "本起動（15:44）で resume-check 通過（推定方式）"
   ],
   "todo": [
-   "研究・開発の作業内容をユーザーから受け取る"
+   "リポジトリでの研究・開発作業の指定をユーザーから受け取る"
   ],
   "next": [
-   "PROGRESS.md の次の作業"
+   "作業が指定されたら plan-wake で予約を再開"
   ],
   "usage": {
    "basis": "estimated",
    "official": false,
-   "estimated_reset": "2026-11-04T15:38+09:00",
+   "estimated_reset": "2026-11-04T20:44+09:00",
    "action": "continue"
   },
   "test": {
