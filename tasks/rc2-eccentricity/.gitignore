@@ -1,0 +1,4 @@
+materials/
+output/
+__pycache__/
+*.pyc
