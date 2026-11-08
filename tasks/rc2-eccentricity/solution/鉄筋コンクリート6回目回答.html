@@ -1,22 +1,22 @@
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><style>
 @page { size: A4; margin: 16mm 15mm; }
-body { font-family: 'IPAGothic', sans-serif; font-size: 10.5pt; line-height: 1.6; color:#111; }
-h1 { font-size: 16pt; border-bottom: 2px solid #333; padding-bottom: 4px; margin: 0 0 6px; }
-h2 { font-size: 12.5pt; background:#eef2f7; padding: 3px 8px; margin: 14px 0 6px; break-after: avoid; }
-.eq { font-family: 'IPAGothic', monospace; background:#fafafa; border-left:3px solid #1565c0;
+body { font-family: 'IPAGothic', sans-serif; font-size: 10.5pt; line-height: 1.6; color:#000; }
+h1 { font-size: 16pt; border-bottom: 2px solid #000; padding-bottom: 4px; margin: 0 0 6px; }
+h2 { font-size: 12.5pt; border-bottom:1px solid #000; padding: 3px 8px; margin: 14px 0 6px; break-after: avoid; }
+.eq { font-family: 'IPAGothic', monospace; border-left:3px solid #000;
        padding: 4px 10px; margin: 4px 0; white-space: pre-wrap; }
-.res { font-weight: bold; color:#0d47a1; }
-.ng { color:#b71c1c; font-weight:bold; }
+.res { font-weight: bold; color:#000; }
+.ng { color:#000; font-weight:bold; text-decoration: underline; }
 table { border-collapse: collapse; width:100%; margin:6px 0; font-size:9.5pt; }
-td, th { border:1px solid #999; padding: 2px 6px; text-align:center; }
-tr.ok td { background:#e8f5e9; font-weight:bold; }
-.note { font-size: 9pt; color:#444; border:1px solid #ccc; padding:4px 8px; }
+td, th { border:1px solid #000; padding: 2px 6px; text-align:center; }
+tr.ok td { font-weight:bold; }
+.note { font-size: 9pt; color:#000; border:1px solid #000; padding:4px 8px; }
 section { break-inside: avoid; }
 </style></head><body>
 <h1>鉄筋コンクリート構造Ⅱ　偏心率の算定　解説</h1>
 <p class="note">図は課題図の転記値（PROBLEM.md）から作成した模式図。講義ノート pp.20–22 の手順（重心→剛心→偏心距離→ねじり剛性→弾力半径→偏心率）に従う。
 Kは基準剛性として記号のまま扱う。</p>
-<svg viewBox="0 0 600 360" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="IPAGothic, sans-serif" font-size="12"><rect x="70" y="70" width="360" height="240" fill="none" stroke="#999"/><line x1="250" y1="310" x2="250" y2="70" stroke="#bbb" stroke-dasharray="4 3"/><rect x="425" y="70" width="10" height="240" fill="#333"/><text x="442" y="181.0">耐震壁（柱＋壁）</text><text x="442" y="197.0" font-weight="bold">KY = 8K（1回）</text><text x="442" y="213.0" fill="#555">X方向：柱のみ各K</text><rect x="63" y="303" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="70" y="332" text-anchor="middle">N=100kN</text><rect x="243" y="303" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="250" y="332" text-anchor="middle">N=200kN</text><rect x="423" y="303" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="430" y="332" text-anchor="middle">N=100kN</text><rect x="63" y="63" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="70" y="56" text-anchor="middle">N=100kN</text><rect x="243" y="63" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="250" y="56" text-anchor="middle">N=200kN</text><rect x="423" y="63" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="430" y="56" text-anchor="middle">N=100kN</text><circle cx="250.0" cy="190.0" r="6" fill="#1565c0"/><text x="242.0" y="180.0" text-anchor="end" fill="#1565c0">G(6, 4)</text><circle cx="340.0" cy="190.0" r="6" fill="#c62828"/><text x="340.0" y="212.0" text-anchor="middle" fill="#c62828">R(9, 4)</text><line x1="250.0" y1="190.0" x2="340.0" y2="190.0" stroke="#c62828" stroke-width="2" marker-end="url(#a)"/><text x="295.0" y="182.0" text-anchor="middle" fill="#c62828">eX = 3 m</text><defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c62828"/></marker></defs><text x="160.0" y="352" text-anchor="middle">6,000</text><text x="340.0" y="352" text-anchor="middle">6,000</text><text x="58" y="190" text-anchor="end">8,000</text><text x="58" y="314" text-anchor="end">(0,0)</text><text x="448.0" y="346">X →</text><text x="13.0" y="74.0">↑ Y</text></svg>
+<svg viewBox="0 0 600 360" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="IPAGothic, sans-serif" font-size="12"><rect x="70" y="70" width="360" height="240" fill="none" stroke="#000"/><line x1="250" y1="310" x2="250" y2="70" stroke="#000" stroke-dasharray="4 3"/><rect x="425" y="70" width="10" height="240" fill="#000"/><text x="442" y="181.0">耐震壁（柱＋壁）</text><text x="442" y="197.0" font-weight="bold">KY = 8K（1回）</text><text x="442" y="213.0" fill="#000">X方向：柱のみ各K</text><rect x="63" y="303" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="70" y="332" text-anchor="middle">N=100kN</text><rect x="243" y="303" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="250" y="332" text-anchor="middle">N=200kN</text><rect x="423" y="303" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="430" y="332" text-anchor="middle">N=100kN</text><rect x="63" y="63" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="70" y="56" text-anchor="middle">N=100kN</text><rect x="243" y="63" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="250" y="56" text-anchor="middle">N=200kN</text><rect x="423" y="63" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/><text x="430" y="56" text-anchor="middle">N=100kN</text><circle cx="250.0" cy="190.0" r="6" fill="#000"/><text x="242.0" y="180.0" text-anchor="end" fill="#000">G(6, 4)</text><circle cx="340.0" cy="190.0" r="6" fill="#fff" stroke="#000" stroke-width="2"/><text x="340.0" y="212.0" text-anchor="middle" fill="#000">R(9, 4)</text><line x1="250.0" y1="190.0" x2="340.0" y2="190.0" stroke="#000" stroke-width="2" marker-end="url(#a)"/><text x="295.0" y="182.0" text-anchor="middle" fill="#000">eX = 3 m</text><defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#000"/></marker></defs><text x="160.0" y="352" text-anchor="middle">6,000</text><text x="340.0" y="352" text-anchor="middle">6,000</text><text x="58" y="190" text-anchor="end">8,000</text><text x="58" y="314" text-anchor="end">(0,0)</text><text x="448.0" y="346">X →</text><text x="13.0" y="74.0">↑ Y</text></svg>
 <section><h2>0. モデル化の要点</h2>
 <ul>
 <li>右端の<b>耐震壁（柱＋壁）KY＝8K</b>は、端柱2本と壁をまとめた<b>1つの等価ばね</b>。Y方向では x＝12 m に8Kを<b>1回だけ</b>置き、端柱のKを足さない。</li>

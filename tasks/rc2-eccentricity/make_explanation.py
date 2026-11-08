@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the detailed explanation PDF (original content, safe to commit).
 
-    python3 make_explanation.py   ->  solution/explanation.pdf (+ PNG previews)
+    python3 make_explanation.py   ->  solution/鉄筋コンクリート6回目回答.pdf (+ PNG previews)
 
 Numbers are taken from solver.calculate() so the document cannot drift
 from the verified calculation.  Rendered with headless Chromium (CHROME env var or /opt/pw-browsers/chromium).
@@ -27,27 +27,27 @@ def plan_svg(a):
     p = [f'<svg viewBox="0 0 600 360" width="100%" xmlns="http://www.w3.org/2000/svg" '
          f'font-family="IPAGothic, sans-serif" font-size="12">']
     # frame
-    p.append(f'<rect x="{X(0)}" y="{Y(8)}" width="{12*s}" height="{8*s}" fill="none" stroke="#999"/>')
-    p.append(f'<line x1="{X(6)}" y1="{Y(0)}" x2="{X(6)}" y2="{Y(8)}" stroke="#bbb" stroke-dasharray="4 3"/>')
+    p.append(f'<rect x="{X(0)}" y="{Y(8)}" width="{12*s}" height="{8*s}" fill="none" stroke="#000"/>')
+    p.append(f'<line x1="{X(6)}" y1="{Y(0)}" x2="{X(6)}" y2="{Y(8)}" stroke="#000" stroke-dasharray="4 3"/>')
     # wall
-    p.append(f'<rect x="{X(12)-5}" y="{Y(8)}" width="10" height="{8*s}" fill="#333"/>')
+    p.append(f'<rect x="{X(12)-5}" y="{Y(8)}" width="10" height="{8*s}" fill="#000"/>')
     p.append(f'<text x="{X(12)+12}" y="{Y(4.3)}">耐震壁（柱＋壁）</text>')
     p.append(f'<text x="{X(12)+12}" y="{Y(4.3)+16}" font-weight="bold">KY = 8K（1回）</text>')
-    p.append(f'<text x="{X(12)+12}" y="{Y(4.3)+32}" fill="#555">X方向：柱のみ各K</text>')
+    p.append(f'<text x="{X(12)+12}" y="{Y(4.3)+32}" fill="#000">X方向：柱のみ各K</text>')
     for x, y, n in cols:
         p.append(f'<rect x="{X(x)-7}" y="{Y(y)-7}" width="14" height="14" fill="#fff" stroke="#000" stroke-width="2"/>')
         dy = 22 if y == 0 else -14
         p.append(f'<text x="{X(x)}" y="{Y(y)+dy}" text-anchor="middle">N={n}kN</text>')
     # G and R
     gx, gy, rx, ry = (float(a[k]) for k in ("gx", "gy", "rx", "ry"))
-    p.append(f'<circle cx="{X(gx)}" cy="{Y(gy)}" r="6" fill="#1565c0"/>')
-    p.append(f'<text x="{X(gx)-8}" y="{Y(gy)-10}" text-anchor="end" fill="#1565c0">G({gx:g}, {gy:g})</text>')
-    p.append(f'<circle cx="{X(rx)}" cy="{Y(ry)}" r="6" fill="#c62828"/>')
-    p.append(f'<text x="{X(rx)}" y="{Y(ry)+22}" text-anchor="middle" fill="#c62828">R({rx:g}, {ry:g})</text>')
-    p.append(f'<line x1="{X(gx)}" y1="{Y(gy)}" x2="{X(rx)}" y2="{Y(ry)}" stroke="#c62828" stroke-width="2" marker-end="url(#a)"/>')
-    p.append(f'<text x="{X((gx+rx)/2)}" y="{Y(gy)-8}" text-anchor="middle" fill="#c62828">eX = {float(a["ex"]):g} m</text>')
+    p.append(f'<circle cx="{X(gx)}" cy="{Y(gy)}" r="6" fill="#000"/>')
+    p.append(f'<text x="{X(gx)-8}" y="{Y(gy)-10}" text-anchor="end" fill="#000">G({gx:g}, {gy:g})</text>')
+    p.append(f'<circle cx="{X(rx)}" cy="{Y(ry)}" r="6" fill="#fff" stroke="#000" stroke-width="2"/>')
+    p.append(f'<text x="{X(rx)}" y="{Y(ry)+22}" text-anchor="middle" fill="#000">R({rx:g}, {ry:g})</text>')
+    p.append(f'<line x1="{X(gx)}" y1="{Y(gy)}" x2="{X(rx)}" y2="{Y(ry)}" stroke="#000" stroke-width="2" marker-end="url(#a)"/>')
+    p.append(f'<text x="{X((gx+rx)/2)}" y="{Y(gy)-8}" text-anchor="middle" fill="#000">eX = {float(a["ex"]):g} m</text>')
     p.append('<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">'
-             '<path d="M0,0 L8,4 L0,8 z" fill="#c62828"/></marker></defs>')
+             '<path d="M0,0 L8,4 L0,8 z" fill="#000"/></marker></defs>')
     # dims & axes
     for x0, x1 in ((0, 6), (6, 12)):
         p.append(f'<text x="{X((x0+x1)/2)}" y="{Y(0)+42}" text-anchor="middle">6,000</text>')
@@ -66,17 +66,17 @@ def html(a):
         for i, (n, v) in enumerate(ic.sensitivity_cases()))
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>
 @page {{ size: A4; margin: 16mm 15mm; }}
-body {{ font-family: 'IPAGothic', sans-serif; font-size: 10.5pt; line-height: 1.6; color:#111; }}
-h1 {{ font-size: 16pt; border-bottom: 2px solid #333; padding-bottom: 4px; margin: 0 0 6px; }}
-h2 {{ font-size: 12.5pt; background:#eef2f7; padding: 3px 8px; margin: 14px 0 6px; break-after: avoid; }}
-.eq {{ font-family: 'IPAGothic', monospace; background:#fafafa; border-left:3px solid #1565c0;
+body {{ font-family: 'IPAGothic', sans-serif; font-size: 10.5pt; line-height: 1.6; color:#000; }}
+h1 {{ font-size: 16pt; border-bottom: 2px solid #000; padding-bottom: 4px; margin: 0 0 6px; }}
+h2 {{ font-size: 12.5pt; border-bottom:1px solid #000; padding: 3px 8px; margin: 14px 0 6px; break-after: avoid; }}
+.eq {{ font-family: 'IPAGothic', monospace; border-left:3px solid #000;
        padding: 4px 10px; margin: 4px 0; white-space: pre-wrap; }}
-.res {{ font-weight: bold; color:#0d47a1; }}
-.ng {{ color:#b71c1c; font-weight:bold; }}
+.res {{ font-weight: bold; color:#000; }}
+.ng {{ color:#000; font-weight:bold; text-decoration: underline; }}
 table {{ border-collapse: collapse; width:100%; margin:6px 0; font-size:9.5pt; }}
-td, th {{ border:1px solid #999; padding: 2px 6px; text-align:center; }}
-tr.ok td {{ background:#e8f5e9; font-weight:bold; }}
-.note {{ font-size: 9pt; color:#444; border:1px solid #ccc; padding:4px 8px; }}
+td, th {{ border:1px solid #000; padding: 2px 6px; text-align:center; }}
+tr.ok td {{ font-weight:bold; }}
+.note {{ font-size: 9pt; color:#000; border:1px solid #000; padding:4px 8px; }}
 section {{ break-inside: avoid; }}
 </style></head><body>
 <h1>鉄筋コンクリート構造Ⅱ　偏心率の算定　解説</h1>
@@ -129,9 +129,9 @@ def main():
     a = calculate()
     assert a["kr"] == 348 and abs(a["eccentricity_y"] - 3 / sqrt(29)) < 1e-12
     OUT.mkdir(exist_ok=True)
-    src = OUT / "explanation.html"
+    src = OUT / "鉄筋コンクリート6回目回答.html"
     src.write_text(html(a), encoding="utf-8")
-    pdf = OUT / "explanation.pdf"
+    pdf = OUT / "鉄筋コンクリート6回目回答.pdf"
     chrome = os.environ.get("CHROME") or next(
         (c for c in ("/opt/pw-browsers/chromium", shutil.which("chromium"),
                      shutil.which("google-chrome"), shutil.which("chromium-browser")) if c and Path(c).exists()),

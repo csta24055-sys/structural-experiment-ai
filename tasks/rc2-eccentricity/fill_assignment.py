@@ -7,8 +7,8 @@ Usage
     python3 fill_assignment.py --demo          # pipeline self-test on a SYNTHETIC mock sheet
 
 Outputs (git-ignored, never commit: they contain the distributed worksheet)
-    output/filled_assignment.pdf
-    output/filled_assignment_p1.png  (150 dpi render for visual inspection)
+    output/鉄筋コンクリート6回目回答.pdf
+    output/鉄筋コンクリート6回目回答_p1.png  (150 dpi render for visual inspection)
 
 How placement works
     The script does not hard-code coordinates.  It finds the section headings
@@ -39,7 +39,7 @@ FONT_CANDIDATES = [
     "/Library/Fonts/Arial Unicode.ttf",
     "C:/Windows/Fonts/msgothic.ttc",
 ]
-INK = (0.05, 0.15, 0.55)  # dark blue "pen" colour, distinguishable from print
+INK = (0, 0, 0)  # black
 
 # Concise answers per section (K kept symbolic, units retained).
 ANSWERS = {
@@ -227,7 +227,7 @@ def main(argv):
     if not src.exists():
         sys.exit(f"Worksheet PDF not found: {src}\n"
                  "Place the distributed PDF under materials/ (git-ignored) and rerun.")
-    return fill(src, OUT_DIR / "filled_assignment.pdf")
+    return fill(src, OUT_DIR / "鉄筋コンクリート6回目回答.pdf")
 
 
 if __name__ == "__main__":
