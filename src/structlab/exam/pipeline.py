@@ -342,6 +342,10 @@ def render_subject(res: dict, ledger: dict, names: dict, out: Path, work: Path, 
         pdf = base / f"{name}.pdf"
         R.to_pdf(blocks, pdf, title=name, header=res["subject"])
         chk = R.check_pdf(pdf, expect, render_dir=work / "renders" / _safe(res["subject"]))
+        missing = R.missing_glyphs(blocks)
+        if missing:
+            chk["problems"].append(f"フォントに無い文字（表示が欠ける）: {''.join(missing)}")
+            chk["ok"] = False
         if name.endswith("/問題") and any(f"［重要度" in str(b.get("text", "")) for b in blocks):
             chk["problems"].append("問題用紙に重要度が表示されている")
             chk["ok"] = False

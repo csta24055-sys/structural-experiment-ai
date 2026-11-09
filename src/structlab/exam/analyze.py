@@ -147,17 +147,26 @@ def _read_av(m: Material, src: Path, out_dir: Path, ocr, transcriber, sidecar, i
     cov = {"duration": round(info.duration, 1), "video": "なし", "audio": "なし"}
     side_speech = parse_subtitles(sidecar.read_text(encoding="utf-8", errors="replace")) if sidecar else []
     use_asr = transcriber if (transcriber is not None and transcriber.available and not side_speech) else None
+    video_failed = None
     if info.has_video and m.kind == "video":
-        rec = read_video(src, out_dir / "video", ocr=ocr or media.OCR("none"), transcriber=use_asr,
-                         interval=interval, log=log)
-        for sc in rec["scenes"]:
-            if sc.get("same_as") is None:
-                res["units"].append({"kind": "scene", "start": sc["start"], "end": sc["end"],
-                                     "text": sc.get("ocr", ""), "frame": sc.get("frame"), "scene": sc["index"]})
-        speech = rec["speech"]
-        cov["video"] = f"場面 {rec['n_unique_scenes']} 件" + ("（OCR あり）" if ocr is not None and ocr.available
-                                                           else "（OCR なし: 画面の文字は未読取）")
-    else:
+        try:
+            rec = read_video(src, out_dir / "video", ocr=ocr or media.OCR("none"), transcriber=use_asr,
+                             interval=interval, log=log)
+        except media.MediaError as e:
+            # 終端付近の画面が取り出せない動画（録画の最後のフレームが壊れている等）でも、音声・字幕は使う
+            video_failed = str(e)[:150]
+            log(f"  画面の解析に失敗（{video_failed}）。音声・字幕だけで続ける")
+        if video_failed is None:
+            for sc in rec["scenes"]:
+                if sc.get("same_as") is None:
+                    res["units"].append({"kind": "scene", "start": sc["start"], "end": sc["end"],
+                                         "text": sc.get("ocr", ""), "frame": sc.get("frame"), "scene": sc["index"]})
+            speech = rec["speech"]
+            cov["video"] = f"場面 {rec['n_unique_scenes']} 件" + ("（OCR あり）" if ocr is not None and ocr.available
+                                                               else "（OCR なし: 画面の文字は未読取）")
+    if video_failed is not None or not (info.has_video and m.kind == "video"):
+        if video_failed is not None:
+            cov["video"] = f"未解析（画面の取り出しに失敗: {video_failed}）"
         speech = []
         if use_asr is not None and info.has_audio:
             from ..reading.video_read import audio_profile, transcribe_spans, voiced_spans
@@ -172,7 +181,8 @@ def _read_av(m: Material, src: Path, out_dir: Path, ocr, transcriber, sidecar, i
         cov["audio"] = "未解析（文字起こしが無効・未導入）"
     res["units"] += [{"kind": "speech", "start": s["start"], "end": s["end"], "text": s["text"]} for s in speech]
     audio_done = not (info.has_audio and cov["audio"].startswith("未解析"))
-    video_done = not (info.has_video and m.kind == "video" and (ocr is None or not ocr.available))
+    video_done = video_failed is None and not (info.has_video and m.kind == "video"
+                                               and (ocr is None or not ocr.available))
     cov["status"] = "完了" if audio_done and video_done else ("一部" if audio_done or video_done else "未解析")
     cov["detail"] = f"映像: {cov['video']} / 音声: {cov['audio']}"
     res["coverage"] = cov

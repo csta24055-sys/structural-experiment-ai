@@ -1,7 +1,8 @@
 """文書出力（PDF・Word）と品質検査。内容はブロックの列で受け取り、見た目はここだけで決める。
 
-ブロック: {"t": "title"|"h1"|"h2"|"p"|"small"|"pre"|"list"|"table"|"space"|"break", ...}
+ブロック: {"t": "title"|"h1"|"h2"|"p"|"small"|"pre"|"list"|"table"|"space"|"image"|"break", ...}
   p/small/pre: text   list: items   table: rows（1 行目が見出し）   space: lines（解答欄の行数）
+  image: path, width_mm（図。PNG など）
 白背景・黒文字・標準的な日本語書体。日本語フォントは埋め込む（環境に無ければ CID フォント）。
 """
 from __future__ import annotations
@@ -36,6 +37,19 @@ def jp_font() -> str:
     pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
     _FONT = "HeiseiKakuGo-W5"
     return _FONT
+
+
+def missing_glyphs(blocks: list[dict]) -> list[str]:
+    """埋め込む日本語フォントに無い文字（PDF では表示が欠ける）。文字の抽出では見つからないので別に調べる。"""
+    jp_font()
+    from reportlab.pdfbase import pdfmetrics
+    face = getattr(pdfmetrics.getFont(_FONT), "face", None)
+    cmap = getattr(face, "charToGlyph", None)
+    if not cmap:
+        return []  # CID フォントなど、対応表を持たないフォントは調べない
+    text = "".join(str(b.get("text", "")) + "".join(map(str, b.get("items", []))) +
+                   "".join(str(c) for r in b.get("rows", []) for c in r) for b in blocks)
+    return sorted({c for c in text if ord(c) > 127 and ord(c) not in cmap})
 
 
 def _esc(s: str) -> str:
@@ -80,6 +94,13 @@ def to_pdf(blocks: list[dict], path: Path, title: str, header: str = "") -> Path
             box.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.grey),
                                      ("BOX", (0, 0), (-1, -1), 0.6, colors.black)]))
             story.append(KeepTogether([box]))
+        elif t == "image":
+            from reportlab.platypus import Image as RLImage
+            img = RLImage(str(b["path"]))
+            w = float(b.get("width_mm", 120)) * mm
+            img.drawHeight = w * img.imageHeight / img.imageWidth
+            img.drawWidth = w
+            story.append(img)
         elif t == "break":
             story.append(PageBreak())
         story.append(Spacer(1, 2 if t in ("list", "p") else 4))
@@ -137,6 +158,9 @@ def to_docx(blocks: list[dict], path: Path, title: str) -> Path:
         elif t == "space":
             for _ in range(int(b.get("lines", 4))):
                 d.add_paragraph("_" * 60)
+        elif t == "image":
+            from docx.shared import Mm
+            d.add_picture(str(b["path"]), width=Mm(float(b.get("width_mm", 120))))
         elif t == "break":
             d.add_page_break()
     path.parent.mkdir(parents=True, exist_ok=True)

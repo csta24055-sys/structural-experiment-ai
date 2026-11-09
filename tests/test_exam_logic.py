@@ -193,3 +193,14 @@ def test_named_topic_beats_screen_at_scene_boundary():
     cs = Q.find_cues([{"kind": "speech", "start": 60.0, "end": 70.0, "text": "この式は重要です"}], "m", PAT, 3)
     Q.resolve_targets(cs, ts, slide_for_time=lambda mid, t: "T1")
     assert cs[0].target_topic == "T1"  # 名指しが無ければ画面のスライド
+
+
+@pytest.mark.parametrize("line,typ", [
+    ("非常に大事な問題ですのでよく復習をしておいてください", "important_formula"),
+    ("ここが今回のポイントです", "important_formula"),
+    ("次回は小テストを実施します", "quiz"),
+    ("範囲は第3回から本日の授業の内容までです", "scope"),
+])
+def test_cue_phrases_from_real_lectures(line, typ):
+    """実際の授業の言い回し（第5・6回の文字起こし）で取りこぼしていたもの。"""
+    assert typ in [c.type for c in Q.find_cues(speech(line), "m", PAT, 6)]

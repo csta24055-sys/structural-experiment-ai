@@ -123,3 +123,18 @@ def test_real_transcription_with_faster_whisper(tmp_path, cfg_factory):
 
 
 # --- 付録: 開発中に使った作業用スクリプト（scratchpad、リポジトリ外） 12 件 ---
+
+
+def test_extract_frame_after_last_video_frame(tmp_path):
+    """画面録画のように、最後のフレームより後ろまで音声が続く動画でも、終端付近の画面を取り出せる。"""
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg が必要")
+    from structlab import media
+    v = tmp_path / "rec.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x48:d=2", "-f", "lavfi",
+                    "-i", "sine=duration=12", "-c:v", "libx264", "-c:a", "aac", str(v)], check=True)
+    out = media.extract_frame(v, 11.5, tmp_path / "f.jpg")
+    assert out.exists() and out.stat().st_size > 0

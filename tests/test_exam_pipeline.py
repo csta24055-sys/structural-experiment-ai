@@ -240,3 +240,27 @@ def test_quiet_summary_hides_names_and_urls(synth, fake_box, capsys):
     assert rc == 0 and '"subjects": 2' in out
     for secret_ish in ("環境工学", "鉄筋", "第03回", "box.com", "メモ", SECRET):
         assert secret_ish not in out
+
+
+def test_video_failure_keeps_transcript(tmp_path, monkeypatch):
+    """画面の解析に失敗しても、動画と同じ名前の字幕（発言）は使い、映像は未解析として残す。"""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg が必要")
+    from structlab import media
+    from structlab.exam import analyze
+    from structlab.exam.discover import Material
+    v = tmp_path / "第06回.mp4"
+    import subprocess
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=64x48:d=3", "-f", "lavfi",
+                    "-i", "sine=duration=3", "-shortest", "-c:v", "libx264", "-c:a", "aac", str(v)], check=True)
+    sub = tmp_path / "第06回.vtt"
+    sub.write_text(exam_synth.vtt([(1, 2, "非常に大事な問題ですのでよく復習をしておいてください")]), encoding="utf-8")
+
+    def broken(*a, **k):
+        raise media.MediaError("フレームを取得できません: t=2.9")
+
+    monkeypatch.setattr("structlab.reading.video_read.read_video", broken)
+    m = Material(id="v", name=v.name, kind="video", role="lecture_video", source="local:v", local_path=str(v))
+    r = analyze.read_material(m, tmp_path / "out", ocr=None, transcriber=None, sidecar=sub, log=lambda *a: None)
+    assert [u["text"] for u in r["units"] if u["kind"] == "speech"] == ["非常に大事な問題ですのでよく復習をしておいてください"]
+    assert r["coverage"]["status"] == "一部" and "未解析" in r["coverage"]["video"]

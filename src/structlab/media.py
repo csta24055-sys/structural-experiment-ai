@@ -379,11 +379,19 @@ def extract_frame(path: Path, t: float, out_jpg: Path, max_width: int = 1280, re
         if min_width and region.w < min_width:
             vf.append(f"scale={min_width}:-2:flags=lanczos")
     vf.append(f"scale='min({max_width},iw)':-2")
-    _run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", str(path), "-frames:v", "1",
-          "-vf", ",".join(vf), "-q:v", "2", str(out_jpg)])
-    if not out_jpg.exists():
-        raise MediaError(f"フレームを取得できません: t={t:.1f}")
-    return out_jpg
+    # 画面録画は画面が止まると新しいフレームを記録しないため、終端付近の t に映像が無いことがある。前に戻して取り直す
+    tried = set()
+    for back in (0.0, 0.5, 1.5, 3.0, 8.0, 20.0, 40.0):
+        tt = round(max(0.0, t - back), 3)
+        if tt in tried:
+            continue
+        tried.add(tt)
+        out_jpg.unlink(missing_ok=True)  # 前回の残りを成功と取り違えない
+        _run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-ss", f"{tt:.3f}", "-i", str(path), "-frames:v", "1",
+              "-vf", ",".join(vf), "-q:v", "2", str(out_jpg)])
+        if out_jpg.exists():
+            return out_jpg
+    raise MediaError(f"フレームを取得できません: t={t:.1f}")
 
 
 # ---------------- OCR ----------------
